@@ -606,7 +606,7 @@ function NewProjectModal({
             onChange={(e) => onNameChange(e.target.value)}
             placeholder="Go Style"
             className={inputClass}
-            autoFocus
+            data-autofocus
           />
         </Field>
         <Field label="People" hint="One per line, or comma separated. You can change these later.">

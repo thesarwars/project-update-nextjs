@@ -6,7 +6,10 @@ import { BULLET, INDENT, itemsToRaw, parseItems } from "@/lib/format";
 const EMPTY_BULLET = /^[ \t]*[-*•][ \t]*$/;
 const ONLY_INDENT = /^[ \t]+$/;
 const BULLET_PREFIX = /^[ \t]*[-*•][ \t]+$/;
-const STARTS_WITH_MARKER = /^[ \t]*(?:[-*•]|\d{1,3}[.)])[ \t]/;
+/** A line that already opens a point: marker followed by a space. */
+const MARKED_LINE = /^[ \t]*(?:[-*•]|\d{1,3}[.)])[ \t]/;
+/** As above, but a bare `-` with nothing after it counts too — it is a marker in progress. */
+const MARKER_STARTED = /^[ \t]*(?:[-*•]|\d{1,3}[.)])(?:[ \t]|$)/;
 
 interface Props {
   value: string;
@@ -19,12 +22,12 @@ interface Props {
 /**
  * A textarea that behaves like a bullet list.
  *
- *   Enter        finish this point and start the next one (`- `)
+ *   Enter        finish this point, start the next one (`- `)
  *   Shift+Enter  wrap onto another line inside the *same* point (indented)
  *   Enter on an empty point exits the list, the way every editor does it.
  *
- * Edits go through `document.execCommand` where possible so the browser's own
- * undo stack keeps working — rebuilding the value in React state would throw it away.
+ * Every edit goes through `document.execCommand` so the browser's own undo stack
+ * keeps working — rebuilding the value in React state would throw it away.
  */
 export default function BulletEditor({ value, onChange, label, placeholder, minRows = 2 }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -80,6 +83,17 @@ export default function BulletEditor({ value, onChange, label, placeholder, minR
     [onChange],
   );
 
+  /** Put `- ` in front of a field the user has started typing into unprompted. */
+  const openList = useCallback(
+    (el: HTMLTextAreaElement) => {
+      const caret = (el.selectionStart ?? el.value.length) + BULLET.length;
+      applyEdit(0, 0, BULLET);
+      // After applyEdit, so it wins over the fallback path's own caret guess.
+      pendingSelection.current = caret;
+    },
+    [applyEdit],
+  );
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const el = event.currentTarget;
 
@@ -107,6 +121,14 @@ export default function BulletEditor({ value, onChange, label, placeholder, minR
       }
       if (!text.trim()) {
         applyEdit(0, text.length, BULLET);
+        return;
+      }
+      if (collapsed && start === lineStart && MARKED_LINE.test(line)) {
+        // Caret parked in front of an existing marker. Inserting "\n- " here would
+        // put a second marker ahead of this one and the first would be read as the
+        // bullet, leaving a literal "- " inside the item text. Open a point above
+        // instead, which is what every list editor does.
+        applyEdit(lineStart, lineStart, BULLET + "\n");
         return;
       }
       applyEdit(start, end, "\n" + BULLET);
@@ -149,18 +171,28 @@ export default function BulletEditor({ value, onChange, label, placeholder, minR
 
   const handleChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     const next = event.target.value;
-    // First keystroke into an empty field opens the list for you.
+    // First keystroke into an empty field opens the list for you. Never mid-composition:
+    // rewriting the value under an IME scrambles what it is still assembling.
     if (
+      !(event.nativeEvent as InputEvent).isComposing &&
       !value.trim() &&
       next.trim() &&
       !next.includes("\n") &&
-      !STARTS_WITH_MARKER.test(next)
+      !MARKER_STARTED.test(next)
     ) {
-      pendingSelection.current = (event.target.selectionStart ?? next.length) + BULLET.length;
-      onChange(BULLET + next);
+      openList(event.target);
       return;
     }
     onChange(next);
+  };
+
+  const handleCompositionEnd = (event: React.CompositionEvent<HTMLTextAreaElement>) => {
+    // The keystroke path above stands aside for IME input, so the marker for a field
+    // composed from scratch gets added once the composition is committed.
+    const el = event.currentTarget;
+    const text = el.value;
+    if (!text.trim() || text.includes("\n") || MARKER_STARTED.test(text)) return;
+    openList(el);
   };
 
   const handleBlur = () => {
@@ -173,6 +205,7 @@ export default function BulletEditor({ value, onChange, label, placeholder, minR
       ref={ref}
       value={value}
       onChange={handleChange}
+      onCompositionEnd={handleCompositionEnd}
       onKeyDown={handleKeyDown}
       onPaste={handlePaste}
       onBlur={handleBlur}

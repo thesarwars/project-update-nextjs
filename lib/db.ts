@@ -123,9 +123,17 @@ function open(): DatabaseSync {
   return db;
 }
 
+/**
+ * Runs once in the life of a database file, tracked by a settings flag rather than by
+ * "are there any projects". Counting rows would resurrect the sample project every time
+ * the server restarted after you deleted the last real one.
+ */
 function seedIfEmpty(db: DatabaseSync): void {
+  if (getSetting("seeded", db) !== null) return;
+  setSetting("seeded", "1", db);
+
   const row = db.prepare("SELECT COUNT(*) AS n FROM projects").get() as { n: number };
-  if (row.n > 0) return;
+  if (row.n > 0) return; // an existing database predating this flag
 
   const projectId = newId("prj");
   const labelColumns = SECTION_KEYS.map(labelColumn);
@@ -430,8 +438,8 @@ export function datesWithContent(projectId: string): string[] {
  * Settings
  * ------------------------------------------------------------------ */
 
-export function getSetting(key: string): string | null {
-  const row = open().prepare("SELECT value FROM settings WHERE key = ?").get(key) as
+export function getSetting(key: string, db: DatabaseSync = open()): string | null {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as
     | { value: string }
     | undefined;
   return row?.value ?? null;

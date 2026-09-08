@@ -25,12 +25,20 @@ export default function Modal({
   width = "max-w-lg",
 }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
+  /** Where the pointer went down, so a drag that ends on the backdrop does not close. */
+  const pressedBackdrop = useRef(false);
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    if (open && !el.open) el.showModal();
-    else if (!open && el.open) el.close();
+    if (open && !el.open) {
+      el.showModal();
+      // showModal() puts focus on the first focusable child, which is the close button.
+      // React's own autoFocus ran at mount, before this, so it has already been undone.
+      el.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    } else if (!open && el.open) {
+      el.close();
+    }
   }, [open]);
 
   return (
@@ -40,8 +48,13 @@ export default function Modal({
         e.preventDefault();
         onClose();
       }}
+      onPointerDown={(e) => {
+        pressedBackdrop.current = e.target === ref.current;
+      }}
       onClick={(e) => {
-        if (e.target === ref.current) onClose(); // click on the backdrop
+        // Both ends of the interaction must be the backdrop. Selecting text in an input
+        // and releasing outside the dialog would otherwise discard the whole form.
+        if (pressedBackdrop.current && e.target === ref.current) onClose();
       }}
       className={`m-auto w-[calc(100vw-2rem)] ${width} rounded-2xl border border-line bg-surface p-0 text-foreground shadow-xl backdrop:bg-black/45 backdrop:backdrop-blur-[2px]`}
     >
