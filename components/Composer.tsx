@@ -9,12 +9,18 @@ import PreviewPane from "./PreviewPane";
 import PreviousDayPanel from "./PreviousDayPanel";
 import StandupToolbar from "./StandupToolbar";
 import { useToast } from "./Toast";
+import {
+  LEGACY_PREFS_KEY,
+  PREFS_COOKIE,
+  serializePrefs,
+  type StandupPrefs,
+} from "@/lib/standupPrefs";
 import { useReportSave } from "./shell/SaveProvider";
 import { EmptyState, Key } from "./ui";
 import { copyPlain, copyRich } from "@/lib/clipboard";
+import { useRouter } from "next/navigation";
 import { addDays, formatDisplayDate, isValidISODate, todayISO } from "@/lib/date";
 import {
-  DEFAULT_RENDER_OPTIONS,
   buildDoc,
   buildPersonDoc,
   docIsEmpty,
@@ -35,8 +41,6 @@ import {
   type Project,
 } from "@/lib/types";
 
-const PREFS_KEY = "standup.prefs.v1";
-
 interface PendingSave extends EntryText {
   projectId: string;
   date: string;
@@ -54,47 +58,19 @@ async function saveEntry(item: PendingSave): Promise<void> {
   if (!res.ok) throw new Error(`PUT /api/entries -> ${res.status}`);
 }
 
-interface Prefs {
-  options: RenderOptions;
-  flavor: CopyFlavor;
-  showPrevious: boolean;
-}
-
-/** Bookmarked ?date=, read during the first render. */
-function initialDate(): string {
-  if (typeof window === "undefined") return todayISO();
-  const fromUrl = new URL(window.location.href).searchParams.get("date");
-  return isValidISODate(fromUrl) ? fromUrl : todayISO();
-}
-
-function loadPrefs(): Prefs {
-  const fallback: Prefs = {
-    options: DEFAULT_RENDER_OPTIONS,
-    flavor: "rich",
-    showPrevious: true,
-  };
-  if (typeof window === "undefined") return fallback;
-  try {
-    const raw = window.localStorage.getItem(PREFS_KEY);
-    if (!raw) return fallback;
-    const saved = JSON.parse(raw) as Partial<Prefs>;
-    return {
-      options: { ...DEFAULT_RENDER_OPTIONS, ...saved.options },
-      flavor: saved.flavor ?? "rich",
-      showPrevious: saved.showPrevious ?? true,
-    };
-  } catch {
-    return fallback;
-  }
-}
-
 export default function Composer({
   project,
   issuesByPerson,
+  initialDate,
+  initialPrefs,
 }: {
   project: Project;
   /** Each person's open issues, so a card offers their own work first. */
   issuesByPerson: Record<string, Issue[]>;
+  /** From ?date= on the server, so the first client render agrees with the HTML. */
+  initialDate: string;
+  /** From a cookie, for the same reason. */
+  initialPrefs: StandupPrefs;
 }) {
   const [date, setDate] = useState<string>(initialDate);
   const [entries, setEntries] = useState<Record<string, Entry>>({});
@@ -102,11 +78,12 @@ export default function Composer({
     from: null,
     entries: {},
   });
-  const [options, setOptions] = useState<RenderOptions>(() => loadPrefs().options);
-  const [flavor, setFlavor] = useState<CopyFlavor>(() => loadPrefs().flavor);
-  const [showPrevious, setShowPrevious] = useState(() => loadPrefs().showPrevious);
+  const [options, setOptions] = useState<RenderOptions>(initialPrefs.options);
+  const [flavor, setFlavor] = useState<CopyFlavor>(initialPrefs.flavor);
+  const [showPrevious, setShowPrevious] = useState(initialPrefs.showPrevious);
   const [copied, setCopied] = useState<string | null>(null);
 
+  const router = useRouter();
   const toast = useToast();
   const reportSave = useReportSave();
   const projectId = project.id;
@@ -195,12 +172,28 @@ export default function Composer({
   }, [projectId, date]);
 
   useEffect(() => {
+    document.cookie = `${PREFS_COOKIE}=${serializePrefs({ options, flavor, showPrevious })}; path=/; max-age=${60 * 60 * 24 * 365}; samesite=lax`;
+  }, [options, flavor, showPrevious]);
+
+  // One-time carry-over of settings that predate the cookie. Writes the cookie and asks
+  // the server to re-render with it; after that the branch never runs again.
+  useEffect(() => {
+    if (document.cookie.includes(`${PREFS_COOKIE}=`)) return;
+    let legacy: string | null = null;
     try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify({ options, flavor, showPrevious }));
+      legacy = localStorage.getItem(LEGACY_PREFS_KEY);
     } catch {
       /* private mode */
     }
-  }, [options, flavor, showPrevious]);
+    if (!legacy) return;
+    document.cookie = `${PREFS_COOKIE}=${encodeURIComponent(legacy)}; path=/; max-age=${60 * 60 * 24 * 365}; samesite=lax`;
+    try {
+      localStorage.removeItem(LEGACY_PREFS_KEY);
+    } catch {
+      /* ignore */
+    }
+    router.refresh();
+  }, [router]);
 
   /* ---------------- rendering the update ---------------- */
 

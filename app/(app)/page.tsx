@@ -1,8 +1,11 @@
+import { cookies } from "next/headers";
 import Link from "next/link";
 import Composer from "@/components/Composer";
 import { EmptyState } from "@/components/ui";
 import { requireUser } from "@/lib/auth";
 import { getSetting, listIssues, openIssuesForPerson, projectsVisibleTo } from "@/lib/db";
+import { isValidISODate, todayISO } from "@/lib/date";
+import { PREFS_COOKIE, parsePrefs } from "@/lib/standupPrefs";
 import type { Issue } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -53,5 +56,19 @@ export default async function StandupPage({ searchParams }: PageProps<"/">) {
     issuesByPerson[person.id] = [...mine, ...openAll.filter((i) => !mineIds.has(i.id))].slice(0, 60);
   }
 
-  return <Composer project={project} issuesByPerson={issuesByPerson} />;
+  // Both of these are read here rather than in the client, because this screen is
+  // server-rendered: a date from window.location or preferences from localStorage would
+  // make the first client render disagree with the HTML React just sent.
+  const requestedDate = typeof params.date === "string" ? params.date : null;
+  const initialDate = isValidISODate(requestedDate) ? requestedDate : todayISO();
+  const initialPrefs = parsePrefs((await cookies()).get(PREFS_COOKIE)?.value);
+
+  return (
+    <Composer
+      project={project}
+      issuesByPerson={issuesByPerson}
+      initialDate={initialDate}
+      initialPrefs={initialPrefs}
+    />
+  );
 }
