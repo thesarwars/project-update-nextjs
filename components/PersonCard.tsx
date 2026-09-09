@@ -4,7 +4,14 @@ import { LuArrowDownToLine, LuCheck, LuCopy } from "react-icons/lu";
 import BulletEditor from "./BulletEditor";
 import { IconButton } from "./ui";
 import { countBullets } from "@/lib/format";
-import { SECTION_KEYS, type Entry, type EntryText, type Person, type SectionKey } from "@/lib/types";
+import {
+  SECTION_KEYS,
+  type Entry,
+  type EntryText,
+  type Issue,
+  type Person,
+  type SectionKey,
+} from "@/lib/types";
 
 const PLACEHOLDERS: Record<SectionKey, string> = {
   done: "What landed…",
@@ -22,6 +29,8 @@ interface Props {
   onChange: (patch: Partial<EntryText>) => void;
   onCopy: () => void;
   onCarry: () => void;
+  /** Open issues that can be dropped into a section as a reference. */
+  issues: Issue[];
 }
 
 export default function PersonCard({
@@ -33,6 +42,7 @@ export default function PersonCard({
   onChange,
   onCopy,
   onCarry,
+  issues,
 }: Props) {
   const counts = SECTION_KEYS.map((key) => ({
     key,
@@ -78,8 +88,21 @@ export default function PersonCard({
       <div className="grid gap-3 px-4 py-3 sm:grid-cols-2">
         {SECTION_KEYS.map((key) => (
           <div key={key} className="flex flex-col gap-1.5">
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+            <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-muted">
               {labels[key]}
+              {issues.length ? (
+                <InsertIssue
+                  section={labels[key]}
+                  issues={issues}
+                  onPick={(issue) => {
+                    // Appended as an ordinary point. The key is what links it back to
+                    // the issue, so the text stays plain and the copy output is unchanged.
+                    const current = entry[key].replace(/\s+$/, "");
+                    const line = `- ${issue.key} ${issue.title}`;
+                    onChange({ [key]: current ? `${current}\n${line}` : line });
+                  }}
+                />
+              ) : null}
             </span>
             <BulletEditor
               value={entry[key]}
@@ -91,5 +114,42 @@ export default function PersonCard({
         ))}
       </div>
     </section>
+  );
+}
+
+/** Drops `- GS-14 Title` into a section, so nobody retypes a key and gets it wrong. */
+function InsertIssue({
+  section,
+  issues,
+  onPick,
+}: {
+  section: string;
+  issues: Issue[];
+  onPick: (issue: Issue) => void;
+}) {
+  return (
+    <>
+      <label className="sr-only" htmlFor={`insert-${section}`}>
+        Add an issue to {section}
+      </label>
+      <select
+        id={`insert-${section}`}
+        value=""
+        onChange={(e) => {
+          const issue = issues.find((i) => i.id === e.target.value);
+          if (issue) onPick(issue);
+          e.currentTarget.value = "";
+        }}
+        title={`Add an issue to ${section}`}
+        className="h-5 w-5 cursor-pointer appearance-none rounded border border-line bg-surface text-center text-[11px] leading-none text-muted outline-none hover:border-line-strong focus:border-accent"
+      >
+        <option value="">+</option>
+        {issues.map((issue) => (
+          <option key={issue.id} value={issue.id}>
+            {issue.key} {issue.title}
+          </option>
+        ))}
+      </select>
+    </>
   );
 }

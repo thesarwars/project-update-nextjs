@@ -2,7 +2,8 @@ import Link from "next/link";
 import Composer from "@/components/Composer";
 import { EmptyState } from "@/components/ui";
 import { requireUser } from "@/lib/auth";
-import { getSetting, projectsVisibleTo } from "@/lib/db";
+import { getSetting, listIssues, openIssuesForPerson, projectsVisibleTo } from "@/lib/db";
+import type { Issue } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -43,5 +44,14 @@ export default async function StandupPage({ searchParams }: PageProps<"/">) {
     );
   }
 
-  return <Composer project={project} />;
+  // Their own open work first, then everything else open, so the common case is one click.
+  const openAll = listIssues(project.id).filter((i) => i.archivedAt === null);
+  const issuesByPerson: Record<string, Issue[]> = {};
+  for (const person of project.people) {
+    const mine = openIssuesForPerson(project.id, person.id);
+    const mineIds = new Set(mine.map((i) => i.id));
+    issuesByPerson[person.id] = [...mine, ...openAll.filter((i) => !mineIds.has(i.id))].slice(0, 60);
+  }
+
+  return <Composer project={project} issuesByPerson={issuesByPerson} />;
 }

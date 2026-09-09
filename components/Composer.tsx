@@ -30,6 +30,7 @@ import {
   emptyEntry,
   type Entry,
   type EntryText,
+  type Issue,
   type Person,
   type Project,
 } from "@/lib/types";
@@ -87,7 +88,14 @@ function loadPrefs(): Prefs {
   }
 }
 
-export default function Composer({ project }: { project: Project }) {
+export default function Composer({
+  project,
+  issuesByPerson,
+}: {
+  project: Project;
+  /** Each person's open issues, so a card offers their own work first. */
+  issuesByPerson: Record<string, Issue[]>;
+}) {
   const [date, setDate] = useState<string>(initialDate);
   const [entries, setEntries] = useState<Record<string, Entry>>({});
   const [carry, setCarry] = useState<{ from: string | null; entries: Record<string, Entry> }>({
@@ -351,6 +359,7 @@ export default function Composer({ project }: { project: Project }) {
                 onChange={(patch) => updateEntry(person.id, patch)}
                 onCopy={() => copyPerson(person.id)}
                 onCarry={() => carryOne(person)}
+                issues={issuesByPerson[person.id] ?? []}
               />
             ))
           )}

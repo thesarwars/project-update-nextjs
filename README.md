@@ -117,6 +117,30 @@ Output looks like this:
 
 Edits save themselves about half a second after you stop typing; the header says when.
 
+## Issues and the standup
+
+The tracker holds the work: **epic → story → task → subtask**, plus **bugs**, which sit where
+tasks sit and can themselves parent bugs or tasks. Squares are plan items and a circle is a
+defect, so a bug nested under a bug reads differently from a subtask at a glance, and a
+`↳ sub-bug` chip appears only where the nesting is unusual.
+
+- **Board** — columns from the project's own statuses. Drag a card, or use the keyboard:
+  arrows move around, `⌥`+arrows move the card, `Space` picks it up.
+- **Backlog** — every issue in hierarchy order, with a dropdown on each row for which sprint
+  it is in.
+- **Tree** — the shape of the work. `c` adds a child, `Shift`+`c` a sibling, `Enter` saves and
+  opens the next; focus any branch to work inside it.
+- **Sprints** — you choose which epics, stories and tasks are in, and the counters follow:
+  `Epics 1/2 · Stories 3/5 · Tasks 7/10`. Nothing is typed in. A container also shows its
+  progress *within that sprint*, and children living elsewhere appear dimmed and are never
+  counted — so an epic spanning four sprints does not read as three failures.
+- **My work** — everything assigned to you, across projects.
+
+**The two halves meet.** Write `GS-14` in a standup field and the issue records that it was
+mentioned, by whom, on which day, in which section. The `+` beside each section label drops
+`- GS-14 Title` in for you, offering that person's own open issues first, so nobody retypes a
+key and gets it wrong. The text stays plain, so the copy output is exactly what it always was.
+
 ## Data
 
 Everything lives in `data/standup.db`, an ordinary SQLite file — copy it to back up, delete it

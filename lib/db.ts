@@ -265,6 +265,21 @@ CREATE INDEX IF NOT EXISTS sprint_issues_by_issue ON sprint_issues(issue_id);
 
 -- A closed sprint's numbers are frozen. Editing an issue in 2027 must not rewrite what
 -- a sprint report said in 2026, and that cannot be recomputed after the fact.
+-- Which issues a standup entry refers to.
+--
+-- A side table rather than a column on entries: free text keeps working exactly as it
+-- did, nothing about the composer changes, and the issue -> standup direction becomes a
+-- query instead of a scan of every entry ever written.
+CREATE TABLE IF NOT EXISTS entry_mentions (
+  project_id TEXT NOT NULL,
+  date       TEXT NOT NULL,
+  person_id  TEXT NOT NULL,
+  section    TEXT NOT NULL,
+  issue_id   TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+  PRIMARY KEY (project_id, date, person_id, section, issue_id)
+);
+CREATE INDEX IF NOT EXISTS entry_mentions_by_issue ON entry_mentions(issue_id, date DESC);
+
 CREATE TABLE IF NOT EXISTS sprint_reports (
   sprint_id     TEXT PRIMARY KEY REFERENCES sprints(id) ON DELETE CASCADE,
   closed_at     TEXT NOT NULL,
@@ -990,23 +1005,31 @@ export function setEntry(
   // An emptied entry is deleted rather than stored blank, which keeps
   // "days that have content" queries honest.
   if (SECTION_KEYS.every((key) => !text[key].trim())) {
-    db.prepare("DELETE FROM entries WHERE project_id = ? AND date = ? AND person_id = ?").run(
-      projectId,
-      date,
-      personId,
-    );
+    withWrite((tx) => {
+      tx.prepare("DELETE FROM entries WHERE project_id = ? AND date = ? AND person_id = ?").run(
+        projectId,
+        date,
+        personId,
+      );
+      tx.prepare(
+        "DELETE FROM entry_mentions WHERE project_id = ? AND date = ? AND person_id = ?",
+      ).run(projectId, date, personId);
+    });
     return { ...emptyText(), updatedAt };
   }
 
   const columns = SECTION_KEYS.join(", ");
   const placeholders = SECTION_KEYS.map(() => "?").join(", ");
   const updates = SECTION_KEYS.map((key) => `${key} = excluded.${key}`).join(", ");
-  db.prepare(
-    `INSERT INTO entries (project_id, date, person_id, updated_at, ${columns})
-     VALUES (?, ?, ?, ?, ${placeholders})
-     ON CONFLICT(project_id, date, person_id)
-     DO UPDATE SET updated_at = excluded.updated_at, ${updates}`,
-  ).run(projectId, date, personId, updatedAt, ...SECTION_KEYS.map((key) => text[key]));
+  withWrite((tx) => {
+    tx.prepare(
+      `INSERT INTO entries (project_id, date, person_id, updated_at, ${columns})
+       VALUES (?, ?, ?, ?, ${placeholders})
+       ON CONFLICT(project_id, date, person_id)
+       DO UPDATE SET updated_at = excluded.updated_at, ${updates}`,
+    ).run(projectId, date, personId, updatedAt, ...SECTION_KEYS.map((key) => text[key]));
+    reindexMentions(tx, projectId, date, personId, text);
+  });
 
   return { ...text, updatedAt };
 }
@@ -2346,4 +2369,127 @@ export function sprintByIssue(projectId: string): Record<string, Sprint> {
   const out: Record<string, Sprint> = {};
   for (const row of rows) out[String(row.issue_id)] = toSprint(row);
   return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * The seam: standup entries that refer to issues
+ * ------------------------------------------------------------------ */
+
+/** `GS-14`, `gs-14` — the prefix identifies the project, so the key stands alone. */
+const ISSUE_KEY_PATTERN = /\b([A-Za-z][A-Za-z0-9]{0,9})-(\d{1,7})\b/g;
+
+/**
+ * Rewrite the mentions for one entry from its text.
+ *
+ * Re-derived on every save rather than diffed: the text is the truth, the rows are a
+ * cache of it, and a handful of deletes and inserts is cheaper than being clever about
+ * what changed.
+ */
+function reindexMentions(
+  db: DatabaseSync,
+  projectId: string,
+  date: string,
+  personId: string,
+  text: EntryText,
+): void {
+  db.prepare("DELETE FROM entry_mentions WHERE project_id = ? AND date = ? AND person_id = ?").run(
+    projectId,
+    date,
+    personId,
+  );
+
+  const lookup = db.prepare(
+    `SELECT i.id FROM issues i JOIN projects p ON p.id = i.project_id
+      WHERE p.key = ? COLLATE NOCASE AND i.number = ?`,
+  );
+  const insert = db.prepare(
+    `INSERT INTO entry_mentions (project_id, date, person_id, section, issue_id)
+     VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+  );
+
+  for (const section of SECTION_KEYS) {
+    for (const match of text[section].matchAll(ISSUE_KEY_PATTERN)) {
+      const row = lookup.get(match[1], Number(match[2])) as { id: string } | undefined;
+      if (row) insert.run(projectId, date, personId, section, row.id);
+    }
+  }
+}
+
+export interface Mention {
+  date: string;
+  personId: string;
+  personName: string;
+  section: string;
+}
+
+/** Where an issue has been talked about in the standup, newest first. */
+export function mentionsForIssue(issueId: string, limit = 20): Mention[] {
+  return (
+    open()
+      .prepare(
+        `SELECT m.date, m.person_id, m.section, p.name AS person_name
+           FROM entry_mentions m
+           JOIN people p ON p.id = m.person_id
+          WHERE m.issue_id = ?
+          ORDER BY m.date DESC, p.sort_order
+          LIMIT ?`,
+      )
+      .all(issueId, limit) as unknown as Row[]
+  ).map((r) => ({
+    date: String(r.date),
+    personId: String(r.person_id),
+    personName: String(r.person_name),
+    section: String(r.section),
+  }));
+}
+
+/** Rebuild the index for a whole project — for issues created after entries were written. */
+export function reindexProjectMentions(projectId: string): number {
+  return withWrite((tx) => {
+    const rows = tx
+      .prepare("SELECT * FROM entries WHERE project_id = ?")
+      .all(projectId) as unknown as Row[];
+    for (const row of rows) {
+      const text = {} as EntryText;
+      for (const key of SECTION_KEYS) text[key] = String(row[key] ?? "");
+      reindexMentions(tx, projectId, String(row.date), String(row.person_id), text);
+    }
+    return rows.length;
+  });
+}
+
+/**
+ * Someone's open work, for pulling into a standup.
+ *
+ * Assignment is by roster row, so this works for people who have not signed up yet.
+ */
+export function openIssuesForPerson(projectId: string, personId: string): Issue[] {
+  const db = open();
+  const key = projectKeyOf(db, projectId);
+  return (
+    db
+      .prepare(
+        `SELECT i.* FROM issues i
+           JOIN statuses s ON s.id = i.status_id
+          WHERE i.project_id = ? AND i.assignee_person_id = ?
+            AND i.archived_at IS NULL AND s.is_done = 0
+          ORDER BY i.priority, i.rank`,
+      )
+      .all(projectId, personId) as unknown as Row[]
+  ).map((r) => toIssue(r, key));
+}
+
+/** Everything assigned to this account across the projects they are on. */
+export function issuesAssignedToUser(userId: string): Issue[] {
+  const db = open();
+  const rows = db
+    .prepare(
+      `SELECT i.*, p.key AS project_key FROM issues i
+         JOIN people m ON m.id = i.assignee_person_id
+         JOIN projects p ON p.id = i.project_id
+        WHERE m.user_id = ? AND i.archived_at IS NULL
+        ORDER BY i.priority, i.updated_at DESC`,
+    )
+    .all(userId) as unknown as Row[];
+  return rows.map((r) => toIssue(r, String(r.project_key ?? "?")));
 }

@@ -38,6 +38,7 @@ export default async function IssuePage({ params }: PageProps<"/i/[key]">) {
           ancestors={view.ancestors}
           childIssues={view.children}
           statusById={view.statusById}
+          mentions={view.mentions}
           layout="page"
           backHref={`/backlog?project=${encodeURIComponent(view.project.id)}`}
         />

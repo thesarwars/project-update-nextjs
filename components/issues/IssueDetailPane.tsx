@@ -32,6 +32,7 @@ export default function IssueDetailPane({
         ancestors={view.ancestors}
         childIssues={view.children}
         statusById={view.statusById}
+        mentions={view.mentions}
         layout="pane"
         backHref={backHref}
       />

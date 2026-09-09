@@ -13,7 +13,10 @@ import { Button, IconButton, inputClass } from "@/components/ui";
 import { useToast } from "@/components/Toast";
 import { useReportSave } from "@/components/shell/SaveProvider";
 import { useDebouncedSave } from "@/lib/useDebouncedSave";
+import { formatDisplayDate } from "@/lib/date";
+import type { Mention } from "@/lib/db";
 import {
+  DEFAULT_LABELS,
   PARENT_RULES,
   PRIORITIES,
   PRIORITY_LABELS,
@@ -32,6 +35,7 @@ interface Props {
   /** Not React children — the issue's own child issues. */
   childIssues: Issue[];
   statusById: Record<string, Status>;
+  mentions: Mention[];
   /** "pane" sits beside the list; "page" is the full-width form after a refresh. */
   layout: "pane" | "page";
   backHref: string;
@@ -67,6 +71,7 @@ export default function IssueDetail({
   ancestors,
   childIssues,
   statusById,
+  mentions,
   layout,
   backHref,
 }: Props) {
@@ -267,6 +272,24 @@ export default function IssueDetail({
           </div>
 
           <aside className="flex flex-col gap-3">
+            {mentions.length ? (
+              <section className="order-last flex flex-col gap-1 border-t border-line pt-3">
+                <span className="text-[11px] font-medium text-muted">Mentioned in standup</span>
+                <ul className="flex flex-col gap-0.5">
+                  {mentions.map((m) => (
+                    <li key={`${m.date}-${m.personId}-${m.section}`} className="text-[12px]">
+                      <Link
+                        href={`/?project=${encodeURIComponent(issue.projectId)}&date=${m.date}`}
+                        className="text-muted hover:text-foreground"
+                      >
+                        {formatDisplayDate(m.date)} — {m.personName},{" "}
+                        {DEFAULT_LABELS[m.section as keyof typeof DEFAULT_LABELS] ?? m.section}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
             <Row label="Status">
               <select
                 value={issue.statusId}

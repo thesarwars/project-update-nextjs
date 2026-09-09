@@ -1,6 +1,6 @@
 import "server-only";
 
-import { getIssue, getIssueByKey, listIssues, listStatuses } from "./db";
+import { getIssue, getIssueByKey, listIssues, listStatuses, mentionsForIssue, type Mention } from "./db";
 import type { Issue, Person, Project, Status } from "./types";
 import { getProject } from "./db";
 
@@ -13,6 +13,8 @@ export interface IssueView {
   people: Person[];
   ancestors: Issue[];
   children: Issue[];
+  /** Where this issue has been talked about in the standup. */
+  mentions: Mention[];
 }
 
 /** Everything the detail surface needs, from a display key like `GS-142`. */
@@ -46,5 +48,6 @@ export function loadIssueView(key: string): IssueView | null {
     people: project.people,
     ancestors,
     children,
+    mentions: mentionsForIssue(issue.id),
   };
 }
