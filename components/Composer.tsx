@@ -481,15 +481,23 @@ export default function Composer() {
               />
             ))
           )}
-          <p className="px-1 pb-2 text-[11px] text-muted">
-            <kbd className="rounded border border-line bg-surface px-1">Enter</kbd> next point ·{" "}
-            <kbd className="rounded border border-line bg-surface px-1">Shift</kbd>+
-            <kbd className="rounded border border-line bg-surface px-1">Enter</kbd> another line in
-            the same point ·{" "}
-            <kbd className="rounded border border-line bg-surface px-1">⌘</kbd>+
-            <kbd className="rounded border border-line bg-surface px-1">Shift</kbd>+
-            <kbd className="rounded border border-line bg-surface px-1">C</kbd> copy everything
-          </p>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 px-1 pb-2 text-[11px] text-muted">
+            <span>
+              <Key>Enter</Key> next point
+            </span>
+            <span>
+              <Key>Shift</Key>+<Key>Enter</Key> another line, same point
+            </span>
+            <span>
+              <Key>Tab</Key> / <Key>Shift</Key>+<Key>Tab</Key> nest a point
+            </span>
+            <span>
+              <Key>Backspace</Key> over the <code className="font-mono">-</code> makes a sub-header
+            </span>
+            <span>
+              <Key>{"\u2318"}</Key>+<Key>Shift</Key>+<Key>C</Key> copy everything
+            </span>
+          </div>
         </div>
 
         <div className="lg:min-h-0">
@@ -539,6 +547,12 @@ export default function Composer() {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function Key({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded border border-line bg-surface px-1 font-sans text-[10px]">{children}</kbd>
   );
 }
 

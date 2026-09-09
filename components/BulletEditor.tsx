@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import { BULLET, INDENT, itemsToRaw, parseItems } from "@/lib/format";
+import { BULLET, INDENT, LIST_MARKER, blocksToRaw, indentWidth, parseBlocks } from "@/lib/format";
 
 const EMPTY_BULLET = /^[ \t]*[-*•][ \t]*$/;
 const ONLY_INDENT = /^[ \t]+$/;
@@ -10,6 +10,25 @@ const BULLET_PREFIX = /^[ \t]*[-*•][ \t]+$/;
 const MARKED_LINE = /^[ \t]*(?:[-*•]|\d{1,3}[.)])[ \t]/;
 /** As above, but a bare `-` with nothing after it counts too — it is a marker in progress. */
 const MARKER_STARTED = /^[ \t]*(?:[-*•]|\d{1,3}[.)])(?:[ \t]|$)/;
+
+const leadingWhitespace = (line: string) => line.match(/^[ \t]*/)![0];
+const depthOf = (line: string) => Math.floor(indentWidth(leadingWhitespace(line)) / 2);
+
+/**
+ * How deep the point above this line sits, so Tab can never indent a point past
+ * the one it would nest under. -1 means there is nothing above to nest into.
+ */
+function depthAbove(text: string, lineStart: number): number {
+  if (lineStart === 0) return -1;
+  const lines = text.slice(0, lineStart - 1).split("\n");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const marked = lines[i].match(LIST_MARKER);
+    if (marked) return Math.floor(indentWidth(marked[1]) / 2);
+    // A sub-header at the margin starts a fresh run of points.
+    if (lines[i].trim() && !/^[ \t]/.test(lines[i])) return -1;
+  }
+  return -1;
+}
 
 interface Props {
   value: string;
@@ -104,18 +123,25 @@ export default function BulletEditor({ value, onChange, label, placeholder, minR
 
       const { selectionStart: start, selectionEnd: end, value: text } = el;
 
-      if (event.shiftKey) {
-        applyEdit(start, end, "\n" + INDENT);
-        return;
-      }
-
       const lineStart = text.lastIndexOf("\n", start - 1) + 1;
       const nextBreak = text.indexOf("\n", end);
       const lineEnd = nextBreak === -1 ? text.length : nextBreak;
       const line = text.slice(lineStart, lineEnd);
+      const lead = leadingWhitespace(line);
       const collapsed = start === end;
 
+      if (event.shiftKey) {
+        applyEdit(start, end, "\n" + lead + INDENT); // same point, next line, aligned under it
+        return;
+      }
+
       if (collapsed && (EMPTY_BULLET.test(line) || ONLY_INDENT.test(line))) {
+        const depth = depthOf(line);
+        if (EMPTY_BULLET.test(line) && depth > 0) {
+          // An empty sub-point steps back out a level before leaving the list.
+          applyEdit(lineStart, lineEnd, INDENT.repeat(depth - 1) + BULLET);
+          return;
+        }
         applyEdit(lineStart, lineEnd, ""); // nothing on this point — leave the list
         return;
       }
@@ -128,10 +154,38 @@ export default function BulletEditor({ value, onChange, label, placeholder, minR
         // put a second marker ahead of this one and the first would be read as the
         // bullet, leaving a literal "- " inside the item text. Open a point above
         // instead, which is what every list editor does.
-        applyEdit(lineStart, lineStart, BULLET + "\n");
+        applyEdit(lineStart, lineStart, lead + BULLET + "\n");
         return;
       }
-      applyEdit(start, end, "\n" + BULLET);
+      applyEdit(start, end, "\n" + lead + BULLET); // stay at this nesting level
+      return;
+    }
+
+    if (event.key === "Tab") {
+      const { selectionStart: start, selectionEnd: end, value: text } = el;
+      const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+      const nextBreak = text.indexOf("\n", end);
+      const line = text.slice(lineStart, nextBreak === -1 ? text.length : nextBreak);
+      // Only points move. On a sub-header or an empty field Tab still moves focus,
+      // so the keyboard is never trapped in here.
+      if (!MARKED_LINE.test(line)) return;
+
+      const lead = leadingWhitespace(line);
+      const depth = depthOf(line);
+      if (event.shiftKey) {
+        if (depth === 0) return; // nothing to outdent — let focus move back instead
+        event.preventDefault();
+        applyEdit(lineStart, lineStart + lead.length, INDENT.repeat(depth - 1));
+        return;
+      }
+      if (depth > depthAbove(text, lineStart)) return; // no point above to nest under
+      event.preventDefault();
+      applyEdit(lineStart, lineStart + lead.length, INDENT.repeat(depth + 1));
+      return;
+    }
+
+    if (event.key === "Escape") {
+      el.blur(); // the way out for anyone tabbing through the page
       return;
     }
 
@@ -151,8 +205,8 @@ export default function BulletEditor({ value, onChange, label, placeholder, minR
     const pasted = event.clipboardData.getData("text/plain");
     if (!pasted || !/[\r\n]/.test(pasted)) return; // single line: nothing to tidy
 
-    const items = parseItems(pasted);
-    if (!items.length) return;
+    const blocks = parseBlocks(pasted, { bareLineIsHeader: false });
+    if (!blocks.length) return;
     event.preventDefault();
 
     const el = event.currentTarget;
@@ -160,7 +214,7 @@ export default function BulletEditor({ value, onChange, label, placeholder, minR
     const lineStart = text.lastIndexOf("\n", start - 1) + 1;
     const before = text.slice(lineStart, start);
 
-    let insert = itemsToRaw(items);
+    let insert = blocksToRaw(blocks);
     if (BULLET_PREFIX.test(before) || EMPTY_BULLET.test(before)) {
       insert = insert.slice(BULLET.length); // cursor already sits on a marker
     } else if (before.trim()) {

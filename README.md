@@ -19,12 +19,30 @@ use every day cost you nothing.
 | --- | --- |
 | `Enter` | finish this point, start the next one |
 | `Shift`+`Enter` | another line inside the **same** point |
-| `Enter` on an empty point | leave the list |
-| `Backspace` right after a `- ` | remove that bullet |
+| `Tab` / `Shift`+`Tab` | nest this point under the one above, or pull it back out |
+| `Backspace` over the `- ` | turn the line into a **sub-header** |
+| `Enter` on an empty point | step out a level, then leave the list |
+| `Escape` | leave the field (so `Tab` can move on) |
 | `⌘`/`Ctrl`+`Shift`+`C` | copy the whole update |
 | `⌘`/`Ctrl`+`S` | force a save (it already autosaves) |
 
-Pasting a list from somewhere else strips whatever bullets it came with and re-bullets it.
+So a field can hold more than a flat list:
+
+```
+Role Review:
+- attend team meeting
+  - beauty section
+  - salon section
+- make the documents also
+```
+
+`Role Review:` is a line with no `- ` in front of it, which makes it a bold sub-header rather
+than a point. The two indented lines are sub-points of the one above them. Pasting a list from
+somewhere else strips whatever bullets it came with, keeps its indentation, and re-bullets it.
+
+Sub-points survive the trip into **Discord**, **Slack**, **Google Docs**, **Notion** and email as
+real nested lists. **WhatsApp** has no nested lists at all, so there they come through indented
+and marked with `◦` instead.
 
 ## Copying
 

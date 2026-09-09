@@ -3,7 +3,7 @@
 import { LuArrowDownToLine, LuCheck, LuCopy } from "react-icons/lu";
 import BulletEditor from "./BulletEditor";
 import { IconButton } from "./ui";
-import { parseItems } from "@/lib/format";
+import { countBullets } from "@/lib/format";
 import { SECTION_KEYS, type Entry, type EntryText, type Person, type SectionKey } from "@/lib/types";
 
 const PLACEHOLDERS: Record<SectionKey, string> = {
@@ -37,7 +37,7 @@ export default function PersonCard({
   const counts = SECTION_KEYS.map((key) => ({
     key,
     label: labels[key],
-    count: parseItems(entry[key]).length,
+    count: countBullets(entry[key]),
   })).filter((s) => s.count > 0);
   const empty = counts.length === 0;
 
