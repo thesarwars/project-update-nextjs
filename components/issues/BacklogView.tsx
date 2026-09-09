@@ -7,7 +7,16 @@ import IssueRow from "./IssueRow";
 import IssueTypeIcon from "./IssueTypeIcon";
 import { Button, EmptyState, inputClass } from "@/components/ui";
 import { useToast } from "@/components/Toast";
-import { ISSUE_TYPES, ROOT_TYPES, type Issue, type IssueType, type Project, type Status } from "@/lib/types";
+import {
+  ISSUE_TYPES,
+  MULTI_SPRINT_TYPES,
+  ROOT_TYPES,
+  type Issue,
+  type IssueType,
+  type Project,
+  type Sprint,
+  type Status,
+} from "@/lib/types";
 
 interface Props {
   project: Project;
@@ -15,9 +24,21 @@ interface Props {
   statuses: Status[];
   rollups: Record<string, { total: number; done: number }>;
   selectedId: string | null;
+  /** Open sprints you can pull work into. */
+  sprints: Sprint[];
+  /** Which sprint each issue is currently in. */
+  sprintByIssue: Record<string, string>;
 }
 
-export default function BacklogView({ project, issues, statuses, rollups, selectedId }: Props) {
+export default function BacklogView({
+  project,
+  issues,
+  statuses,
+  rollups,
+  selectedId,
+  sprints,
+  sprintByIssue,
+}: Props) {
   const router = useRouter();
   const params = useSearchParams();
   const toast = useToast();
@@ -52,6 +73,36 @@ export default function BacklogView({ project, issues, statuses, rollups, select
     }
   };
 
+  /**
+   * Putting an issue in a sprint is the whole planning gesture, so it is one control on
+   * the row rather than a separate screen. Task-level work moves between sprints; epics
+   * and stories can sit in several, which is why an epic can span a quarter.
+   */
+  const setSprint = async (issue: Issue, sprintId: string) => {
+    const current = sprintByIssue[issue.id];
+    try {
+      if (current && current !== sprintId) {
+        await fetch(`/api/sprints/${current}/scope?issueId=${issue.id}`, { method: "DELETE" });
+      }
+      if (sprintId) {
+        const res = await fetch(`/api/sprints/${sprintId}/scope`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ issueIds: [issue.id] }),
+        });
+        if (!res.ok) {
+          const { error } = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(error ?? "failed");
+        }
+        const { moved } = (await res.json()) as { moved: number };
+        if (moved) toast(`${issue.key} moved out of its previous sprint.`);
+      }
+      router.refresh();
+    } catch (err) {
+      toast(err instanceof Error && err.message !== "failed" ? err.message : "Could not change that.");
+    }
+  };
+
   const hrefFor = (issue: Issue) => {
     const next = new URLSearchParams(params);
     return `/i/${issue.key}?${next}`;
@@ -68,6 +119,8 @@ export default function BacklogView({ project, issues, statuses, rollups, select
         <ul className="flex flex-col">
           {issues.map((issue) => (
             <li key={issue.id}>
+              <div className="flex items-center gap-1">
+                <span className="min-w-0 flex-1">
               <IssueRow
                 issue={issue}
                 status={statusById.get(issue.statusId)}
@@ -79,6 +132,28 @@ export default function BacklogView({ project, issues, statuses, rollups, select
                 selected={selectedId === issue.id}
                 href={hrefFor(issue)}
               />
+                </span>
+                {sprints.length ? (
+                  <select
+                    value={sprintByIssue[issue.id] ?? ""}
+                    onChange={(e) => void setSprint(issue, e.target.value)}
+                    aria-label={`Sprint for ${issue.key}`}
+                    title={
+                      MULTI_SPRINT_TYPES.includes(issue.type)
+                        ? "Epics and stories can span several sprints"
+                        : "Task-level work sits in one sprint at a time"
+                    }
+                    className="h-7 w-[104px] shrink-0 rounded-lg border border-line bg-surface px-1.5 text-[11px] text-muted outline-none focus:border-accent"
+                  >
+                    <option value="">Backlog</option>
+                    {sprints.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
+              </div>
             </li>
           ))}
         </ul>

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { LuCalendarDays, LuColumns3, LuListTodo, LuNetwork, LuSettings, LuUsers } from "react-icons/lu";
+import { LuCalendarDays, LuColumns3, LuListTodo, LuNetwork, LuRocket, LuSettings, LuUsers } from "react-icons/lu";
 
 interface Props {
   /** Used when the URL carries no ?project= yet. */
@@ -14,6 +14,7 @@ const PLAN = [
   { href: "/board", label: "Board", icon: LuColumns3 },
   { href: "/backlog", label: "Backlog", icon: LuListTodo },
   { href: "/tree", label: "Tree", icon: LuNetwork },
+  { href: "/sprints", label: "Sprints", icon: LuRocket },
 ];
 const TEAM = [
   { href: "/team", label: "People", icon: LuUsers },

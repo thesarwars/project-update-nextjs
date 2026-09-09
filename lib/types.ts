@@ -210,3 +210,48 @@ export interface Issue {
   resolvedAt: string | null;
   archivedAt: string | null;
 }
+
+/* ------------------------------------------------------------------ *
+ * Sprints
+ * ------------------------------------------------------------------ */
+
+export const SPRINT_STATES = ["planned", "active", "closed"] as const;
+export type SprintState = (typeof SPRINT_STATES)[number];
+
+/**
+ * Which types may sit in more than one open sprint at a time.
+ *
+ * An epic legitimately spans sprints — that is the whole reason scope is a join table.
+ * Task-level work does not: it is either being done now or it is not, so adding it to a
+ * second sprint moves it rather than duplicating it.
+ */
+export const MULTI_SPRINT_TYPES: readonly IssueType[] = ["epic", "story"];
+
+export interface Sprint {
+  id: string;
+  projectId: string;
+  name: string;
+  goal: string;
+  durationUnit: "days" | "weeks" | "months" | "years";
+  durationCount: number;
+  startDate: string | null;
+  endDate: string | null;
+  state: SprintState;
+  closedAt: string | null;
+  sortOrder: number;
+}
+
+/** Set versus completed, per issue type — derived, never stored while a sprint is open. */
+export interface SprintCount {
+  type: IssueType;
+  set: number;
+  completed: number;
+  inProgress: number;
+}
+
+/** An epic's progress *within one sprint*, separate from whether the epic itself is done. */
+export interface SprintEpicProgress {
+  issueId: string;
+  inSprintChildren: number;
+  inSprintDone: number;
+}

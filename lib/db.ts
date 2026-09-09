@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { rankBetween } from "./rank";
+import { endOfSprint, type DurationUnit } from "./date";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -10,11 +11,16 @@ import {
   ISSUE_TYPE_META,
   PARENT_RULES,
   MAX_DEPTH,
+  MULTI_SPRINT_TYPES,
   ROOT_TYPES,
   type Invite,
   type Issue,
   type IssueType,
   type Role,
+  type Sprint,
+  type SprintCount,
+  type SprintEpicProgress,
+  type SprintState,
   type Status,
   type StatusCategory,
   type Session,
@@ -188,7 +194,8 @@ CREATE INDEX IF NOT EXISTS issues_assignee ON issues(assignee_person_id, status_
 
 -- The database is the backstop for the hierarchy rules. Because the trigger reads the
 -- rule table rather than hard-coding the matrix, changing a rule row changes enforcement.
-CREATE TRIGGER IF NOT EXISTS issues_parent_rule_insert
+DROP TRIGGER IF EXISTS issues_parent_rule_insert;
+CREATE TRIGGER issues_parent_rule_insert
 BEFORE INSERT ON issues WHEN NEW.parent_id IS NOT NULL
 BEGIN
   SELECT RAISE(ABORT, 'illegal_parent_type')
@@ -201,7 +208,8 @@ END;
 
 -- The UPDATE OF list includes type deliberately: retyping a story into a subtask under an
 -- epic is the same violation reached through a different door.
-CREATE TRIGGER IF NOT EXISTS issues_parent_rule_update
+DROP TRIGGER IF EXISTS issues_parent_rule_update;
+CREATE TRIGGER issues_parent_rule_update
 BEFORE UPDATE OF parent_id, type ON issues WHEN NEW.parent_id IS NOT NULL
 BEGIN
   SELECT RAISE(ABORT, 'illegal_parent_type')
@@ -212,7 +220,8 @@ BEGIN
   );
 END;
 
-CREATE TRIGGER IF NOT EXISTS issues_root_type_insert
+DROP TRIGGER IF EXISTS issues_root_type_insert;
+CREATE TRIGGER issues_root_type_insert
 BEFORE INSERT ON issues WHEN NEW.parent_id IS NULL
 BEGIN
   SELECT RAISE(ABORT, 'illegal_root_type')
@@ -221,7 +230,74 @@ BEGIN
   );
 END;
 
-CREATE TRIGGER IF NOT EXISTS issues_root_type_update
+CREATE TABLE IF NOT EXISTS sprints (
+  id             TEXT PRIMARY KEY,
+  project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name           TEXT NOT NULL,
+  goal           TEXT NOT NULL DEFAULT '',
+  -- Unit plus count, not a second date: "next sprint, same length" stays one click, and
+  -- start, length and end can never disagree because the end is derived.
+  duration_unit  TEXT NOT NULL DEFAULT 'weeks'
+                 CHECK (duration_unit IN ('days','weeks','months','years')),
+  duration_count INTEGER NOT NULL DEFAULT 2,
+  start_date     TEXT,
+  end_date       TEXT,
+  state          TEXT NOT NULL DEFAULT 'planned'
+                 CHECK (state IN ('planned','active','closed')),
+  closed_at      TEXT,
+  sort_order     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS sprints_by_project ON sprints(project_id, state, sort_order);
+-- At most one sprint can be running at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS sprints_one_active ON sprints(project_id) WHERE state = 'active';
+
+-- Scope is a join table, not a column on issues, because an epic legitimately spans
+-- sprints and because it gives history for free once a sprint closes.
+CREATE TABLE IF NOT EXISTS sprint_issues (
+  sprint_id              TEXT NOT NULL REFERENCES sprints(id) ON DELETE CASCADE,
+  issue_id               TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+  added_at               TEXT NOT NULL,
+  added_by               TEXT REFERENCES users(id) ON DELETE SET NULL,
+  carried_from_sprint_id TEXT REFERENCES sprints(id) ON DELETE SET NULL,
+  PRIMARY KEY (sprint_id, issue_id)
+);
+CREATE INDEX IF NOT EXISTS sprint_issues_by_issue ON sprint_issues(issue_id);
+
+-- A closed sprint's numbers are frozen. Editing an issue in 2027 must not rewrite what
+-- a sprint report said in 2026, and that cannot be recomputed after the fact.
+CREATE TABLE IF NOT EXISTS sprint_reports (
+  sprint_id     TEXT PRIMARY KEY REFERENCES sprints(id) ON DELETE CASCADE,
+  closed_at     TEXT NOT NULL,
+  closed_by     TEXT REFERENCES users(id) ON DELETE SET NULL,
+  counts_json   TEXT NOT NULL,
+  completed_ids TEXT NOT NULL,
+  carried_ids   TEXT NOT NULL
+);
+
+-- Task-level work belongs to one open sprint at a time; epics and stories may span
+-- several. A partial index cannot express this because the sprint's state lives in
+-- another table, so it is a trigger.
+--
+-- The x.sprint_id <> NEW.sprint_id clause matters: without it, re-adding an issue to
+-- the sprint it is already in aborts, because the trigger runs before ON CONFLICT can
+-- absorb the duplicate. The rule is "already in a DIFFERENT open sprint".
+DROP TRIGGER IF EXISTS sprint_issues_one_open;
+CREATE TRIGGER sprint_issues_one_open
+BEFORE INSERT ON sprint_issues
+WHEN (SELECT type FROM issues WHERE id = NEW.issue_id) IN ('task','bug','subtask')
+BEGIN
+  SELECT RAISE(ABORT, 'issue_already_in_an_open_sprint')
+  WHERE EXISTS (
+    SELECT 1 FROM sprint_issues x
+      JOIN sprints s ON s.id = x.sprint_id
+     WHERE x.issue_id = NEW.issue_id
+       AND x.sprint_id <> NEW.sprint_id
+       AND s.state IN ('planned','active')
+  );
+END;
+
+DROP TRIGGER IF EXISTS issues_root_type_update;
+CREATE TRIGGER issues_root_type_update
 BEFORE UPDATE OF parent_id, type ON issues WHEN NEW.parent_id IS NULL
 BEGIN
   SELECT RAISE(ABORT, 'illegal_root_type')
@@ -1888,5 +1964,386 @@ export function rollupByRoot(projectId: string): Record<string, Rollup> {
       done: Number(r.done),
     };
   }
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * Sprints
+ * ------------------------------------------------------------------ */
+
+const toSprint = (r: Row): Sprint => ({
+  id: String(r.id),
+  projectId: String(r.project_id),
+  name: String(r.name),
+  goal: String(r.goal ?? ""),
+  durationUnit: String(r.duration_unit) as Sprint["durationUnit"],
+  durationCount: Number(r.duration_count),
+  startDate: r.start_date == null ? null : String(r.start_date),
+  endDate: r.end_date == null ? null : String(r.end_date),
+  state: String(r.state) as SprintState,
+  closedAt: r.closed_at == null ? null : String(r.closed_at),
+  sortOrder: Number(r.sort_order),
+});
+
+export function listSprints(projectId: string): Sprint[] {
+  return (
+    open()
+      .prepare(
+        `SELECT * FROM sprints WHERE project_id = ?
+          ORDER BY CASE state WHEN 'active' THEN 0 WHEN 'planned' THEN 1 ELSE 2 END,
+                   sort_order, start_date`,
+      )
+      .all(projectId) as unknown as Row[]
+  ).map(toSprint);
+}
+
+export function getSprint(id: string): Sprint | null {
+  const row = open().prepare("SELECT * FROM sprints WHERE id = ?").get(id) as unknown as
+    | Row
+    | undefined;
+  return row ? toSprint(row) : null;
+}
+
+export interface NewSprint {
+  projectId: string;
+  name: string;
+  goal?: string;
+  durationUnit: DurationUnit;
+  durationCount: number;
+  startDate: string | null;
+}
+
+export function createSprint(input: NewSprint): Sprint {
+  const id = newId("spr");
+  withWrite((tx) => {
+    const { n } = tx
+      .prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM sprints WHERE project_id = ?")
+      .get(input.projectId) as { n: number };
+    tx.prepare(
+      `INSERT INTO sprints (id, project_id, name, goal, duration_unit, duration_count, start_date, end_date, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      input.projectId,
+      input.name,
+      input.goal ?? "",
+      input.durationUnit,
+      input.durationCount,
+      input.startDate,
+      input.startDate
+        ? endOfSprint(input.startDate, input.durationUnit, input.durationCount)
+        : null,
+      n,
+    );
+  });
+  return getSprint(id)!;
+}
+
+export interface SprintPatch {
+  name?: string;
+  goal?: string;
+  durationUnit?: DurationUnit;
+  durationCount?: number;
+  startDate?: string | null;
+}
+
+export function updateSprint(id: string, patch: SprintPatch): Sprint | null {
+  const current = getSprint(id);
+  if (!current) return null;
+
+  const unit = patch.durationUnit ?? current.durationUnit;
+  const count = patch.durationCount ?? current.durationCount;
+  const start = patch.startDate !== undefined ? patch.startDate : current.startDate;
+
+  withWrite((tx) =>
+    tx
+      .prepare(
+        `UPDATE sprints SET name = ?, goal = ?, duration_unit = ?, duration_count = ?,
+                            start_date = ?, end_date = ? WHERE id = ?`,
+      )
+      .run(
+        patch.name ?? current.name,
+        patch.goal ?? current.goal,
+        unit,
+        count,
+        start,
+        // Always derived, so start, length and end cannot drift apart.
+        start ? endOfSprint(start, unit, count) : null,
+        id,
+      ),
+  );
+  return getSprint(id);
+}
+
+export type SprintError = "not-found" | "already-active" | "not-open" | "already-in-open-sprint";
+
+/** Starting a sprint while another is running is refused: at most one is active. */
+export function startSprint(id: string): Sprint | SprintError {
+  const outcome = withWrite((tx): SprintError | null => {
+    const sprint = tx.prepare("SELECT * FROM sprints WHERE id = ?").get(id) as unknown as
+      | Row
+      | undefined;
+    if (!sprint) return "not-found";
+    if (String(sprint.state) !== "planned") return "not-open";
+
+    const running = tx
+      .prepare("SELECT id FROM sprints WHERE project_id = ? AND state = 'active'")
+      .get(String(sprint.project_id));
+    if (running) return "already-active";
+
+    tx.prepare("UPDATE sprints SET state = 'active' WHERE id = ?").run(id);
+    return null;
+  });
+  return outcome ?? getSprint(id)!;
+}
+
+export function deleteSprint(id: string): boolean {
+  return withWrite((tx) => tx.prepare("DELETE FROM sprints WHERE id = ?").run(id).changes > 0);
+}
+
+/* ---------------- scope ---------------- */
+
+export function sprintScopeIds(sprintId: string): string[] {
+  return (
+    open()
+      .prepare("SELECT issue_id FROM sprint_issues WHERE sprint_id = ?")
+      .all(sprintId) as unknown as { issue_id: string }[]
+  ).map((r) => r.issue_id);
+}
+
+/**
+ * Put an issue in a sprint.
+ *
+ * Task-level work is *moved*: it is either being worked on now or it is not, so adding it
+ * to a second open sprint takes it out of the first. Epics and stories are left alone,
+ * because spanning sprints is exactly what they do.
+ */
+export function addToSprint(
+  sprintId: string,
+  issueId: string,
+  addedBy: string | null,
+): "added" | "moved" | SprintError {
+  return withWrite((tx): "added" | "moved" | SprintError => {
+    const sprint = tx.prepare("SELECT state FROM sprints WHERE id = ?").get(sprintId) as
+      | { state: string }
+      | undefined;
+    if (!sprint) return "not-found";
+    if (sprint.state === "closed") return "not-open";
+
+    const issue = tx.prepare("SELECT type FROM issues WHERE id = ?").get(issueId) as
+      | { type: string }
+      | undefined;
+    if (!issue) return "not-found";
+
+    let moved = false;
+    if (!MULTI_SPRINT_TYPES.includes(issue.type as never)) {
+      const { changes } = tx
+        .prepare(
+          `DELETE FROM sprint_issues
+            WHERE issue_id = ? AND sprint_id <> ?
+              AND sprint_id IN (SELECT id FROM sprints WHERE state IN ('planned','active'))`,
+        )
+        .run(issueId, sprintId);
+      moved = changes > 0;
+    }
+
+    tx.prepare(
+      `INSERT INTO sprint_issues (sprint_id, issue_id, added_at, added_by)
+       VALUES (?, ?, ?, ?) ON CONFLICT(sprint_id, issue_id) DO NOTHING`,
+    ).run(sprintId, issueId, new Date().toISOString(), addedBy);
+
+    return moved ? "moved" : "added";
+  });
+}
+
+export function removeFromSprint(sprintId: string, issueId: string): void {
+  withWrite((tx) =>
+    tx.prepare("DELETE FROM sprint_issues WHERE sprint_id = ? AND issue_id = ?").run(
+      sprintId,
+      issueId,
+    ),
+  );
+}
+
+/* ---------------- derived numbers ---------------- */
+
+/**
+ * Set versus completed, per type — the panel the whole feature exists for.
+ *
+ * Computed on read rather than maintained. Keeping counters correct would mean hooking
+ * status changes, scope changes, type changes, archiving, re-parenting, deletion and the
+ * is_done flag on a status — nine places to drift, to save a handful of milliseconds.
+ *
+ * "Completed" means one flat thing: the issue's own status is done. Not "all its children
+ * are", which would make the number unexplainable when two epics show incomplete for
+ * different structural reasons.
+ */
+export function sprintCounts(sprintId: string): SprintCount[] {
+  const rows = open()
+    .prepare(
+      `SELECT i.type AS type,
+              COUNT(*) AS set_count,
+              SUM(CASE WHEN st.is_done THEN 1 ELSE 0 END) AS completed_count,
+              SUM(CASE WHEN st.category = 'in_progress' THEN 1 ELSE 0 END) AS in_progress_count
+         FROM sprint_issues si
+         JOIN issues i ON i.id = si.issue_id AND i.archived_at IS NULL
+         JOIN statuses st ON st.id = i.status_id
+        WHERE si.sprint_id = ?
+        GROUP BY i.type`,
+    )
+    .all(sprintId) as unknown as Row[];
+
+  const byType = new Map(
+    rows.map((r) => [
+      String(r.type),
+      {
+        type: String(r.type) as SprintCount["type"],
+        set: Number(r.set_count),
+        completed: Number(r.completed_count),
+        inProgress: Number(r.in_progress_count),
+      },
+    ]),
+  );
+
+  // Ordered by the type list so the panel reads the same every time.
+  return ISSUE_TYPES.map(
+    (type) => byType.get(type) ?? { type, set: 0, completed: 0, inProgress: 0 },
+  ).filter((count) => count.set > 0);
+}
+
+/**
+ * How much of each in-scope epic actually moved *in this sprint*.
+ *
+ * Without this an epic running across four sprints reads 0/1 three times and looks like
+ * three failures.
+ *
+ * The `path LIKE` here is safe where the same shape elsewhere would not be: rows are
+ * already fetched by primary key from this sprint's scope, so the pattern filters a
+ * handful of rows rather than driving a scan of the project.
+ */
+export function sprintEpicProgress(sprintId: string): SprintEpicProgress[] {
+  const rows = open()
+    .prepare(
+      `SELECT e.id AS issue_id,
+              COUNT(d.id) AS in_sprint_children,
+              COALESCE(SUM(CASE WHEN ds.is_done THEN 1 ELSE 0 END), 0) AS in_sprint_done
+         FROM sprint_issues se
+         JOIN issues e ON e.id = se.issue_id AND e.type IN ('epic','story')
+         LEFT JOIN sprint_issues sd ON sd.sprint_id = se.sprint_id
+         LEFT JOIN issues d ON d.id = sd.issue_id AND d.id <> e.id
+                           AND d.path LIKE e.path || e.id || '/%'
+         LEFT JOIN statuses ds ON ds.id = d.status_id
+        WHERE se.sprint_id = ?
+        GROUP BY e.id`,
+    )
+    .all(sprintId) as unknown as Row[];
+
+  return rows.map((r) => ({
+    issueId: String(r.issue_id),
+    inSprintChildren: Number(r.in_sprint_children),
+    inSprintDone: Number(r.in_sprint_done),
+  }));
+}
+
+/**
+ * Close a sprint.
+ *
+ * The counts are frozen into a report here, because "what was true on the day we closed"
+ * is the one number that genuinely cannot be recomputed later. Unfinished work carries
+ * forward with a note of where it came from, which makes "this has slipped three
+ * sprints" a single query.
+ */
+export function closeSprint(
+  id: string,
+  options: { closedBy: string | null; carryToSprintId?: string | null },
+): Sprint | SprintError {
+  const outcome = withWrite((tx): SprintError | null => {
+    const sprint = tx.prepare("SELECT * FROM sprints WHERE id = ?").get(id) as unknown as
+      | Row
+      | undefined;
+    if (!sprint) return "not-found";
+    if (String(sprint.state) === "closed") return "not-open";
+
+    const scope = tx
+      .prepare(
+        `SELECT i.id, st.is_done FROM sprint_issues si
+           JOIN issues i ON i.id = si.issue_id
+           JOIN statuses st ON st.id = i.status_id
+          WHERE si.sprint_id = ?`,
+      )
+      .all(id) as unknown as { id: string; is_done: number }[];
+
+    const completed = scope.filter((r) => r.is_done === 1).map((r) => r.id);
+    const carried = scope.filter((r) => r.is_done !== 1).map((r) => r.id);
+    const now = new Date().toISOString();
+
+    tx.prepare(
+      `INSERT INTO sprint_reports (sprint_id, closed_at, closed_by, counts_json, completed_ids, carried_ids)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(sprint_id) DO UPDATE SET closed_at = excluded.closed_at`,
+    ).run(
+      id,
+      now,
+      options.closedBy,
+      JSON.stringify(sprintCounts(id)),
+      JSON.stringify(completed),
+      JSON.stringify(carried),
+    );
+
+    tx.prepare("UPDATE sprints SET state = 'closed', closed_at = ? WHERE id = ?").run(now, id);
+
+    if (options.carryToSprintId) {
+      const target = tx
+        .prepare("SELECT state FROM sprints WHERE id = ? AND project_id = ?")
+        .get(options.carryToSprintId, String(sprint.project_id)) as { state: string } | undefined;
+      if (target && target.state !== "closed") {
+        const carry = tx.prepare(
+          `INSERT INTO sprint_issues (sprint_id, issue_id, added_at, added_by, carried_from_sprint_id)
+           VALUES (?, ?, ?, ?, ?) ON CONFLICT(sprint_id, issue_id) DO NOTHING`,
+        );
+        for (const issueId of carried) {
+          carry.run(options.carryToSprintId, issueId, now, options.closedBy, id);
+        }
+      }
+    }
+    return null;
+  });
+
+  return outcome ?? getSprint(id)!;
+}
+
+export interface SprintReport {
+  sprintId: string;
+  closedAt: string;
+  counts: SprintCount[];
+  completedIds: string[];
+  carriedIds: string[];
+}
+
+export function getSprintReport(sprintId: string): SprintReport | null {
+  const row = open().prepare("SELECT * FROM sprint_reports WHERE sprint_id = ?").get(sprintId) as
+    | Row
+    | undefined;
+  if (!row) return null;
+  return {
+    sprintId,
+    closedAt: String(row.closed_at),
+    counts: JSON.parse(String(row.counts_json)) as SprintCount[],
+    completedIds: JSON.parse(String(row.completed_ids)) as string[],
+    carriedIds: JSON.parse(String(row.carried_ids)) as string[],
+  };
+}
+
+/** Which sprint each issue is in, for badges on the backlog and the board. */
+export function sprintByIssue(projectId: string): Record<string, Sprint> {
+  const rows = open()
+    .prepare(
+      `SELECT si.issue_id AS issue_id, s.* FROM sprint_issues si
+         JOIN sprints s ON s.id = si.sprint_id
+        WHERE s.project_id = ? AND s.state IN ('planned','active')`,
+    )
+    .all(projectId) as unknown as Row[];
+  const out: Record<string, Sprint> = {};
+  for (const row of rows) out[String(row.issue_id)] = toSprint(row);
   return out;
 }

@@ -61,3 +61,54 @@ export function previousWorkday(iso: string): string {
   while (isWeekend(cur) && guard++ < 7) cur = addDays(cur, -1);
   return cur;
 }
+
+export const DURATION_UNITS = ["days", "weeks", "months", "years"] as const;
+export type DurationUnit = (typeof DURATION_UNITS)[number];
+
+/**
+ * The last day of a sprint, inclusive.
+ *
+ * Stored as unit + count rather than a second date so "next sprint, same length" stays
+ * one click and the two can never disagree. Month and year arithmetic clamps rather than
+ * overflowing: a sprint starting 31 January and running one month ends 28 February, not
+ * 3 March.
+ */
+export function endOfSprint(startISO: string, unit: DurationUnit, count: number): string {
+  const start = parseISO(startISO);
+  const n = Math.max(1, Math.floor(count));
+
+  if (unit === "days") return addDays(startISO, n - 1);
+  if (unit === "weeks") return addDays(startISO, n * 7 - 1);
+
+  const months = unit === "months" ? n : n * 12;
+  const target = new Date(start.getFullYear(), start.getMonth() + months, 1);
+  const lastDayOfTarget = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  target.setDate(Math.min(start.getDate(), lastDayOfTarget));
+  // Inclusive: a one-month sprint from the 1st ends on the last day of that month.
+  target.setDate(target.getDate() - 1);
+  return toISO(target);
+}
+
+/** Working days in a range, inclusive, skipping weekends. */
+export function workingDaysBetween(startISO: string, endISO: string): number {
+  let count = 0;
+  let cursor = startISO;
+  let guard = 0;
+  while (cursor <= endISO && guard++ < 4000) {
+    if (!isWeekend(cursor)) count += 1;
+    cursor = addDays(cursor, 1);
+  }
+  return count;
+}
+
+/** Whole days from today until the end, or null once it has passed. */
+export function daysLeft(endISO: string, today = todayISO()): number | null {
+  if (endISO < today) return null;
+  let count = 0;
+  let cursor = today;
+  while (cursor < endISO && count < 4000) {
+    cursor = addDays(cursor, 1);
+    count += 1;
+  }
+  return count;
+}
