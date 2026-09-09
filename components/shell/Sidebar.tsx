@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { LuCalendarDays, LuListTodo, LuSettings, LuUsers } from "react-icons/lu";
+import { LuCalendarDays, LuListTodo, LuNetwork, LuSettings, LuUsers } from "react-icons/lu";
 
 interface Props {
   /** Used when the URL carries no ?project= yet. */
@@ -10,7 +10,10 @@ interface Props {
 }
 
 const PERSONAL = [{ href: "/", label: "Standup", icon: LuCalendarDays }];
-const PLAN = [{ href: "/backlog", label: "Backlog", icon: LuListTodo }];
+const PLAN = [
+  { href: "/backlog", label: "Backlog", icon: LuListTodo },
+  { href: "/tree", label: "Tree", icon: LuNetwork },
+];
 const TEAM = [
   { href: "/team", label: "People", icon: LuUsers },
   { href: "/settings", label: "Settings", icon: LuSettings },
