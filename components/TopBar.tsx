@@ -10,11 +10,9 @@ import {
   LuSettings,
   LuUsers,
 } from "react-icons/lu";
-import { Button, IconButton } from "./ui";
+import { Button, IconButton, SaveBadge, type SaveState } from "./ui";
 import { relativeDayLabel, weekdayName } from "@/lib/date";
 import type { Project } from "@/lib/types";
-
-export type SaveState = "idle" | "saving" | "saved" | "error";
 
 interface Props {
   projects: Project[];
@@ -145,21 +143,5 @@ export default function TopBar({
         </div>
       </div>
     </header>
-  );
-}
-
-function SaveBadge({ state }: { state: SaveState }) {
-  if (state === "idle") return null;
-  const map = {
-    saving: { text: "Saving…", color: "text-muted", dot: "bg-muted" },
-    saved: { text: "Saved", color: "text-muted", dot: "bg-success" },
-    error: { text: "Save failed", color: "text-danger", dot: "bg-danger" },
-  } as const;
-  const s = map[state];
-  return (
-    <span className={`mr-1 inline-flex items-center gap-1.5 text-[11px] ${s.color}`} role="status">
-      <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
-      {s.text}
-    </span>
   );
 }

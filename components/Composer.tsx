@@ -8,8 +8,11 @@ import PersonCard from "./PersonCard";
 import PreviewPane from "./PreviewPane";
 import PreviousDayPanel from "./PreviousDayPanel";
 import ProjectSettings from "./ProjectSettings";
-import TopBar, { type SaveState } from "./TopBar";
-import { Button, Field, inputClass } from "./ui";
+import TopBar from "./TopBar";
+import PaneGrid from "./layout/PaneGrid";
+import { Button, EmptyState, Field, Key, inputClass } from "./ui";
+import { useToast } from "./Toast";
+import { useDebouncedSave } from "@/lib/useDebouncedSave";
 import { copyPlain, copyRich } from "@/lib/clipboard";
 import { addDays, formatDisplayDate, isValidISODate, todayISO } from "@/lib/date";
 import {
@@ -26,7 +29,17 @@ import {
 import { SECTION_KEYS, emptyEntry, type Entry, type EntryText, type Person, type Project } from "@/lib/types";
 
 const PREFS_KEY = "standup.prefs.v1";
-const SAVE_DEBOUNCE_MS = 500;
+
+/** Defined at module scope so `useDebouncedSave`'s flush stays stable across renders. */
+async function saveEntry(item: PendingSave): Promise<void> {
+  const res = await fetch("/api/entries", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(item),
+    keepalive: true,
+  });
+  if (!res.ok) throw new Error(`PUT /api/entries -> ${res.status}`);
+}
 
 interface PendingSave extends EntryText {
   projectId: string;
@@ -75,12 +88,10 @@ export default function Composer() {
     entries: {},
   });
   const [loading, setLoading] = useState(true);
-  const [saveState, setSaveState] = useState<SaveState>("idle");
   const [options, setOptions] = useState<RenderOptions>(() => loadPrefs().options);
   const [flavor, setFlavor] = useState<CopyFlavor>(() => loadPrefs().flavor);
   const [showPrevious, setShowPrevious] = useState(() => loadPrefs().showPrevious);
   const [copied, setCopied] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
   const [peopleOpen, setPeopleOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
@@ -96,44 +107,12 @@ export default function Composer() {
     [project],
   );
 
+  const toast = useToast();
+
   /* ---------------- persistence of edits ---------------- */
 
   const entriesRef = useRef<Record<string, Entry>>({});
-  const pending = useRef(new Map<string, PendingSave>());
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const flush = useCallback(async () => {
-    if (timer.current) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
-    const items = [...pending.current.values()];
-    if (!items.length) return;
-    pending.current.clear();
-    setSaveState("saving");
-
-    try {
-      await Promise.all(
-        items.map(async (item) => {
-          const res = await fetch("/api/entries", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(item),
-            keepalive: true,
-          });
-          if (!res.ok) throw new Error(`PUT /api/entries -> ${res.status}`);
-        }),
-      );
-      setSaveState(pending.current.size ? "saving" : "saved");
-    } catch {
-      // Put them back so the next keystroke retries; never clobber newer edits.
-      for (const item of items) {
-        const key = `${item.projectId}|${item.date}|${item.personId}`;
-        if (!pending.current.has(key)) pending.current.set(key, item);
-      }
-      setSaveState("error");
-    }
-  }, []);
+  const { queue, flush, state: saveState } = useDebouncedSave<PendingSave>({ save: saveEntry });
 
   const updateEntry = useCallback(
     (personId: string, patch: Partial<EntryText>) => {
@@ -145,32 +124,10 @@ export default function Composer() {
 
       const text = {} as EntryText;
       for (const key of SECTION_KEYS) text[key] = next[key];
-      pending.current.set(`${projectId}|${date}|${personId}`, {
-        projectId,
-        date,
-        personId,
-        ...text,
-      });
-      setSaveState("saving");
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => void flush(), SAVE_DEBOUNCE_MS);
+      queue(`${projectId}|${date}|${personId}`, { projectId, date, personId, ...text });
     },
-    [projectId, date, flush],
+    [projectId, date, queue],
   );
-
-  // Don't lose the last keystrokes when the tab goes away.
-  useEffect(() => {
-    const onHide = () => {
-      if (document.visibilityState === "hidden") void flush();
-    };
-    const onUnload = () => void flush();
-    document.addEventListener("visibilitychange", onHide);
-    window.addEventListener("pagehide", onUnload);
-    return () => {
-      document.removeEventListener("visibilitychange", onHide);
-      window.removeEventListener("pagehide", onUnload);
-    };
-  }, [flush]);
 
   /* ---------------- initial load ---------------- */
 
@@ -189,12 +146,12 @@ export default function Composer() {
           null;
         setProjectId(chosen);
       } catch {
-        setToast("Could not reach the server.");
+        toast("Could not reach the server.");
       } finally {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
     try {
@@ -243,14 +200,14 @@ export default function Composer() {
           if (!cancelled) setCarry(previous);
         }
       } catch {
-        if (!cancelled) setToast("Could not load that day.");
+        if (!cancelled) toast("Could not load that day.");
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [projectId, date, flush]);
+  }, [projectId, date, flush, toast]);
 
   // Keep the URL in step so a day is bookmarkable, without a router round-trip.
   useEffect(() => {
@@ -292,9 +249,9 @@ export default function Composer() {
       const ok =
         flavor === "rich" ? await copyRich(renderHtml(target), plain) : await copyPlain(plain);
       if (ok) showCopied(key);
-      else setToast("Copy was blocked — use the Text tab and copy by hand.");
+      else toast("Copy was blocked — use the Text tab and copy by hand.");
     },
-    [flavor, showCopied],
+    [flavor, showCopied, toast],
   );
 
   const copyAll = useCallback(() => {
@@ -327,12 +284,6 @@ export default function Composer() {
     return () => window.removeEventListener("keydown", onKey);
   }, [copyAll, flush]);
 
-  useEffect(() => {
-    if (!toast) return;
-    const id = setTimeout(() => setToast(null), 3200);
-    return () => clearTimeout(id);
-  }, [toast]);
-
   /* ---------------- actions ---------------- */
 
   const carryOne = useCallback(
@@ -355,12 +306,12 @@ export default function Composer() {
       updateEntry(person.id, { todo: previous });
       filled += 1;
     }
-    setToast(
+    toast(
       filled
         ? `Pulled ${filled} ${filled === 1 ? "person" : "people"} forward from ${formatDisplayDate(carry.from!)}.`
         : "Nothing to carry over — those fields already have something.",
     );
-  }, [activePeople, carry, updateEntry]);
+  }, [activePeople, carry, updateEntry, toast]);
 
   const patchProject = useCallback(
     async (id: string, patch: Record<string, unknown>) => {
@@ -370,13 +321,13 @@ export default function Composer() {
         body: JSON.stringify(patch),
       });
       if (!res.ok) {
-        setToast("That change did not save.");
+        toast("That change did not save.");
         return;
       }
       const { project: updated } = (await res.json()) as { project: Project };
       setProjects((list) => list.map((p) => (p.id === updated.id ? updated : p)));
     },
-    [],
+    [toast],
   );
 
   const createProject = useCallback(async () => {
@@ -392,7 +343,7 @@ export default function Composer() {
       body: JSON.stringify({ name, people }),
     });
     if (!res.ok) {
-      setToast("Could not create that project.");
+      toast("Could not create that project.");
       return;
     }
     const { project: created } = (await res.json()) as { project: Project };
@@ -401,19 +352,19 @@ export default function Composer() {
     setNewProjectOpen(false);
     setNewProjectName("");
     setNewProjectPeople("");
-  }, [newProjectName, newProjectPeople]);
+  }, [newProjectName, newProjectPeople, toast]);
 
   const removeProject = useCallback(async () => {
     if (!project) return;
     const res = await fetch(`/api/projects/${project.id}`, { method: "DELETE" });
     if (!res.ok) {
-      setToast("Could not delete that project.");
+      toast("Could not delete that project.");
       return;
     }
     const remaining = projects.filter((p) => p.id !== project.id);
     setProjects(remaining);
     setProjectId(remaining[0]?.id ?? null);
-  }, [project, projects]);
+  }, [project, projects, toast]);
 
   /* ---------------- render ---------------- */
 
@@ -464,16 +415,10 @@ export default function Composer() {
       />
 
       {/* Two independent scroll panes on a wide screen; one ordinary page below that. */}
-      {/* Three independent scroll panes on a wide screen; one ordinary page below that. */}
-      <main
-        className={`mx-auto grid w-full max-w-[1500px] flex-1 gap-4 px-4 py-4 lg:min-h-0 lg:overflow-hidden ${
-          showPrevious
-            ? "lg:grid-cols-[210px_minmax(0,1fr)_340px] xl:grid-cols-[250px_minmax(0,1fr)_400px]"
-            : "lg:grid-cols-[minmax(0,1fr)_420px]"
-        }`}
-      >
-        {showPrevious ? (
-          <div className="order-first max-h-[45vh] lg:max-h-none lg:min-h-0">
+      <PaneGrid
+        columns={showPrevious ? "aside+main+detail" : "main+detail"}
+        aside={
+          showPrevious ? (
             <PreviousDayPanel
               from={carry.from}
               entries={carry.entries}
@@ -481,12 +426,34 @@ export default function Composer() {
               todoLabel={project.labels.todo}
               onCarry={carryOne}
             />
-          </div>
-        ) : null}
-
-        <div className="flex flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1 thin-scroll">
+          ) : undefined
+        }
+        detail={
+          <PreviewPane
+            html={html}
+            text={text}
+            isEmpty={isEmpty}
+            flavor={flavor}
+            onFlavorChange={setFlavor}
+            options={options}
+            onOptionsChange={setOptions}
+            copied={copied === "all"}
+            onCopy={copyAll}
+          />
+        }
+      >
+        <>
           {activePeople.length === 0 ? (
-            <EmptyPeople onManage={() => setPeopleOpen(true)} />
+            <EmptyState
+              icon={<LuUsers className="h-6 w-6" />}
+              title="No one on this standup yet"
+              body="Add the people who report in this standup."
+              action={
+                <Button variant="primary" onClick={() => setPeopleOpen(true)}>
+                  Add people
+                </Button>
+              }
+            />
           ) : (
             activePeople.map((person) => (
               <PersonCard
@@ -523,22 +490,8 @@ export default function Composer() {
               <Key>{"\u2318"}</Key>+<Key>Shift</Key>+<Key>C</Key> copy everything
             </span>
           </div>
-        </div>
-
-        <div className="lg:min-h-0">
-          <PreviewPane
-            html={html}
-            text={text}
-            isEmpty={isEmpty}
-            flavor={flavor}
-            onFlavorChange={setFlavor}
-            options={options}
-            onOptionsChange={setOptions}
-            copied={copied === "all"}
-            onCopy={copyAll}
-          />
-        </div>
-      </main>
+        </>
+      </PaneGrid>
 
       <PeopleManager
         open={peopleOpen}
@@ -563,21 +516,7 @@ export default function Composer() {
         onCreate={createProject}
       />
 
-      {toast ? (
-        <div
-          role="status"
-          className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-full border border-line bg-surface px-4 py-2 text-[12.5px] card-shadow"
-        >
-          {toast}
-        </div>
-      ) : null}
     </div>
-  );
-}
-
-function Key({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="rounded border border-line bg-surface px-1 font-sans text-[10px]">{children}</kbd>
   );
 }
 
@@ -590,18 +529,6 @@ function EmptyProjects({ onCreate }: { onCreate: () => void }) {
       </p>
       <Button variant="primary" size="lg" onClick={onCreate}>
         Create a project
-      </Button>
-    </div>
-  );
-}
-
-function EmptyPeople({ onManage }: { onManage: () => void }) {
-  return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line-strong px-6 py-14 text-center">
-      <LuUsers className="h-6 w-6 text-muted" />
-      <p className="text-[13px] text-muted">Add the people who report in this standup.</p>
-      <Button variant="primary" onClick={onManage}>
-        Add people
       </Button>
     </div>
   );
