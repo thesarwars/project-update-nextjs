@@ -60,7 +60,8 @@ export default async function StandupPage({ searchParams }: PageProps<"/">) {
   // server-rendered: a date from window.location or preferences from localStorage would
   // make the first client render disagree with the HTML React just sent.
   const requestedDate = typeof params.date === "string" ? params.date : null;
-  const initialDate = isValidISODate(requestedDate) ? requestedDate : todayISO();
+  const serverToday = todayISO();
+  const initialDate = isValidISODate(requestedDate) ? requestedDate : serverToday;
   const initialPrefs = parsePrefs((await cookies()).get(PREFS_COOKIE)?.value);
 
   return (
@@ -68,6 +69,7 @@ export default async function StandupPage({ searchParams }: PageProps<"/">) {
       project={project}
       issuesByPerson={issuesByPerson}
       initialDate={initialDate}
+      serverToday={serverToday}
       initialPrefs={initialPrefs}
     />
   );

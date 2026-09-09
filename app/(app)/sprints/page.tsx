@@ -1,4 +1,5 @@
 import SprintsView from "@/components/issues/SprintsView";
+import { todayISO } from "@/lib/date";
 import ViewToolbar from "@/components/shell/ViewToolbar";
 import { EmptyState } from "@/components/ui";
 import { requireUser } from "@/lib/auth";
@@ -53,6 +54,7 @@ export default async function SprintsPage({ searchParams }: PageProps<"/sprints"
           sprints={sprints}
           counts={counts}
           canManage={canManageProject(user)}
+          today={todayISO()}
         />
       </div>
     </>

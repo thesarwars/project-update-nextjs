@@ -41,8 +41,16 @@ export function weekdayName(iso: string): string {
   return WEEKDAYS[parseISO(iso).getDay()];
 }
 
-/** "Today" / "Yesterday" / "Tomorrow" / weekday name, for the date bar. */
-export function relativeDayLabel(iso: string, today = todayISO()): string {
+/**
+ * "Today" / "Yesterday" / "Tomorrow" / weekday name, for the date bar.
+ *
+ * `today` is required rather than defaulted. It used to default to `todayISO()`, which
+ * reads whichever machine is rendering — the server's timezone during SSR and the
+ * viewer's in the browser — so the same date produced "Today" on one side and "Tomorrow"
+ * on the other, and React reported a hydration mismatch for several hours a day. Making
+ * it an argument turns that whole class of bug into a compile error.
+ */
+export function relativeDayLabel(iso: string, today: string): string {
   if (iso === today) return "Today";
   if (iso === addDays(today, -1)) return "Yesterday";
   if (iso === addDays(today, 1)) return "Tomorrow";
@@ -101,8 +109,13 @@ export function workingDaysBetween(startISO: string, endISO: string): number {
   return count;
 }
 
-/** Whole days from today until the end, or null once it has passed. */
-export function daysLeft(endISO: string, today = todayISO()): number | null {
+/**
+ * Whole days from `today` until the end, or null once it has passed.
+ *
+ * `today` is required for the same reason as relativeDayLabel: a defaulted clock read
+ * diverges between the server render and the browser's.
+ */
+export function daysLeft(endISO: string, today: string): number | null {
   if (endISO < today) return null;
   let count = 0;
   let cursor = today;

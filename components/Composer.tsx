@@ -19,7 +19,7 @@ import { useReportSave } from "./shell/SaveProvider";
 import { EmptyState, Key } from "./ui";
 import { copyPlain, copyRich } from "@/lib/clipboard";
 import { useRouter } from "next/navigation";
-import { addDays, formatDisplayDate, isValidISODate, todayISO } from "@/lib/date";
+import { addDays, formatDisplayDate, isValidISODate } from "@/lib/date";
 import {
   buildDoc,
   buildPersonDoc,
@@ -62,6 +62,7 @@ export default function Composer({
   project,
   issuesByPerson,
   initialDate,
+  serverToday,
   initialPrefs,
 }: {
   project: Project;
@@ -69,10 +70,21 @@ export default function Composer({
   issuesByPerson: Record<string, Issue[]>;
   /** From ?date= on the server, so the first client render agrees with the HTML. */
   initialDate: string;
+  /** The server's calendar day, for the same reason. Corrected after mount. */
+  serverToday: string;
   /** From a cookie, for the same reason. */
   initialPrefs: StandupPrefs;
 }) {
   const [date, setDate] = useState<string>(initialDate);
+  // The server's day, used as-is rather than re-read from the browser's clock.
+  //
+  // It has to be one or the other, and the server's is the right one twice over: the
+  // selected date is already chosen from it a few lines up in page.tsx, so labelling it
+  // with the viewer's clock could render "Tomorrow" above a date the server called
+  // today; and a standup is a shared ritual, where everyone naming the same day matters
+  // more than each person's midnight. Reading it here during render was the hydration
+  // mismatch this replaces.
+  const today = serverToday;
   const [entries, setEntries] = useState<Record<string, Entry>>({});
   const [carry, setCarry] = useState<{ from: string | null; entries: Record<string, Entry> }>({
     from: null,
@@ -286,8 +298,9 @@ export default function Composer({
         date={date}
         onDateChange={(d) => isValidISODate(d) && setDate(d)}
         onStepDate={(delta) => setDate((d) => addDays(d, delta))}
-        onToday={() => setDate(todayISO())}
-        isToday={date === todayISO()}
+        today={today}
+        onToday={() => setDate(today)}
+        isToday={date === today}
         carryFrom={carry.from ? formatDisplayDate(carry.from) : null}
         onCarryOver={carryAll}
         showPrevious={showPrevious}
@@ -300,6 +313,7 @@ export default function Composer({
           showPrevious ? (
             <PreviousDayPanel
               from={carry.from}
+              today={today}
               entries={carry.entries}
               people={activePeople}
               todoLabel={project.labels.todo}

@@ -13,6 +13,8 @@ import { relativeDayLabel, weekdayName } from "@/lib/date";
 
 interface Props {
   date: string;
+  /** The current day, supplied by the caller so both renders agree on it. */
+  today: string;
   onDateChange: (date: string) => void;
   onStepDate: (delta: number) => void;
   onToday: () => void;
@@ -29,6 +31,7 @@ interface Props {
  */
 export default function StandupToolbar({
   date,
+  today,
   onDateChange,
   onStepDate,
   onToday,
@@ -63,9 +66,9 @@ export default function StandupToolbar({
           Today
         </Button>
         <span className="ml-1 hidden text-[11px] text-muted sm:inline">
-          {relativeDayLabel(date) === weekdayName(date)
+          {relativeDayLabel(date, today) === weekdayName(date)
             ? weekdayName(date)
-            : `${relativeDayLabel(date)} · ${weekdayName(date)}`}
+            : `${relativeDayLabel(date, today)} · ${weekdayName(date)}`}
         </span>
       </div>
 

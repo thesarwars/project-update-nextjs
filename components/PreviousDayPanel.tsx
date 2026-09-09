@@ -8,6 +8,8 @@ import type { Entry, Person } from "@/lib/types";
 
 interface Props {
   from: string | null;
+  /** The current day, supplied by the caller so both renders agree on it. */
+  today: string;
   entries: Record<string, Entry>;
   people: Person[];
   todoLabel: string;
@@ -18,7 +20,14 @@ interface Props {
  * Last working day's ToDo, sitting beside today's fields so you can see at a glance
  * what each person said they would do before writing what they did.
  */
-export default function PreviousDayPanel({ from, entries, people, todoLabel, onCarry }: Props) {
+export default function PreviousDayPanel({
+  from,
+  today,
+  entries,
+  people,
+  todoLabel,
+  onCarry,
+}: Props) {
   const withTodo = people.filter((p) => (entries[p.id]?.todo ?? "").trim());
 
   return (
@@ -31,9 +40,9 @@ export default function PreviousDayPanel({ from, entries, people, todoLabel, onC
           <p className="mt-0.5 text-[12.5px] font-medium tabular-nums">
             {formatDisplayDate(from)}
             <span className="ml-1.5 font-normal text-muted">
-              {relativeDayLabel(from) === weekdayName(from)
+              {relativeDayLabel(from, today) === weekdayName(from)
                 ? weekdayName(from)
-                : relativeDayLabel(from)}
+                : relativeDayLabel(from, today)}
             </span>
           </p>
         ) : null}

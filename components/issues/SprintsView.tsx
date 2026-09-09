@@ -16,9 +16,11 @@ interface Props {
   sprints: Sprint[];
   counts: Record<string, SprintCount[]>;
   canManage: boolean;
+  /** The server's current day, so the countdown reads the same in both renders. */
+  today: string;
 }
 
-export default function SprintsView({ projectId, sprints, counts, canManage }: Props) {
+export default function SprintsView({ projectId, sprints, counts, canManage, today }: Props) {
   const router = useRouter();
   const toast = useToast();
   const [open, setOpen] = useState(false);
@@ -60,7 +62,7 @@ export default function SprintsView({ projectId, sprints, counts, canManage }: P
 
       <ul className="flex flex-col gap-2">
         {sprints.map((sprint) => {
-          const left = sprint.endDate ? daysLeft(sprint.endDate) : null;
+          const left = sprint.endDate ? daysLeft(sprint.endDate, today) : null;
           return (
             <li key={sprint.id} className="rounded-xl border border-line bg-surface p-3 card-shadow">
               <div className="flex flex-wrap items-center gap-2">
