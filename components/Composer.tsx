@@ -6,6 +6,7 @@ import Modal from "./Modal";
 import PeopleManager from "./PeopleManager";
 import PersonCard from "./PersonCard";
 import PreviewPane from "./PreviewPane";
+import PreviousDayPanel from "./PreviousDayPanel";
 import ProjectSettings from "./ProjectSettings";
 import TopBar, { type SaveState } from "./TopBar";
 import { Button, Field, inputClass } from "./ui";
@@ -36,6 +37,7 @@ interface PendingSave extends EntryText {
 interface Prefs {
   options: RenderOptions;
   flavor: CopyFlavor;
+  showPrevious: boolean;
 }
 
 /** Bookmarked ?date=, read during the first render. */
@@ -47,7 +49,7 @@ function initialDate(): string {
 
 /** Read once during the first render — the loading screen looks the same either way. */
 function loadPrefs(): Prefs {
-  const fallback: Prefs = { options: DEFAULT_RENDER_OPTIONS, flavor: "rich" };
+  const fallback: Prefs = { options: DEFAULT_RENDER_OPTIONS, flavor: "rich", showPrevious: true };
   if (typeof window === "undefined") return fallback;
   try {
     const raw = window.localStorage.getItem(PREFS_KEY);
@@ -56,6 +58,7 @@ function loadPrefs(): Prefs {
     return {
       options: { ...DEFAULT_RENDER_OPTIONS, ...saved.options },
       flavor: saved.flavor ?? "rich",
+      showPrevious: saved.showPrevious ?? true,
     };
   } catch {
     return fallback;
@@ -75,6 +78,7 @@ export default function Composer() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [options, setOptions] = useState<RenderOptions>(() => loadPrefs().options);
   const [flavor, setFlavor] = useState<CopyFlavor>(() => loadPrefs().flavor);
+  const [showPrevious, setShowPrevious] = useState(() => loadPrefs().showPrevious);
   const [copied, setCopied] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [peopleOpen, setPeopleOpen] = useState(false);
@@ -194,11 +198,11 @@ export default function Composer() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify({ options, flavor }));
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ options, flavor, showPrevious }));
     } catch {
       /* private mode */
     }
-  }, [options, flavor]);
+  }, [options, flavor, showPrevious]);
 
   /* ---------------- load a day ---------------- */
 
@@ -452,13 +456,34 @@ export default function Composer() {
         isToday={date === todayISO()}
         carryFrom={carry.from ? formatDisplayDate(carry.from) : null}
         onCarryOver={carryAll}
+        showPrevious={showPrevious}
+        onTogglePrevious={() => setShowPrevious((v) => !v)}
         onManagePeople={() => setPeopleOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
         saveState={saveState}
       />
 
       {/* Two independent scroll panes on a wide screen; one ordinary page below that. */}
-      <main className="mx-auto grid w-full max-w-[1400px] flex-1 gap-4 px-4 py-4 lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_420px] lg:overflow-hidden">
+      {/* Three independent scroll panes on a wide screen; one ordinary page below that. */}
+      <main
+        className={`mx-auto grid w-full max-w-[1500px] flex-1 gap-4 px-4 py-4 lg:min-h-0 lg:overflow-hidden ${
+          showPrevious
+            ? "lg:grid-cols-[210px_minmax(0,1fr)_340px] xl:grid-cols-[250px_minmax(0,1fr)_400px]"
+            : "lg:grid-cols-[minmax(0,1fr)_420px]"
+        }`}
+      >
+        {showPrevious ? (
+          <div className="order-first max-h-[45vh] lg:max-h-none lg:min-h-0">
+            <PreviousDayPanel
+              from={carry.from}
+              entries={carry.entries}
+              people={activePeople}
+              todoLabel={project.labels.todo}
+              onCarry={carryOne}
+            />
+          </div>
+        ) : null}
+
         <div className="flex flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1 thin-scroll">
           {activePeople.length === 0 ? (
             <EmptyPeople onManage={() => setPeopleOpen(true)} />

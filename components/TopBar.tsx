@@ -2,6 +2,8 @@
 
 import {
   LuArrowDownToLine,
+  LuPanelLeftClose,
+  LuPanelLeftOpen,
   LuChevronLeft,
   LuChevronRight,
   LuPlus,
@@ -26,6 +28,8 @@ interface Props {
   isToday: boolean;
   carryFrom: string | null;
   onCarryOver: () => void;
+  showPrevious: boolean;
+  onTogglePrevious: () => void;
   onManagePeople: () => void;
   onOpenSettings: () => void;
   saveState: SaveState;
@@ -43,6 +47,8 @@ export default function TopBar({
   isToday,
   carryFrom,
   onCarryOver,
+  showPrevious,
+  onTogglePrevious,
   onManagePeople,
   onOpenSettings,
   saveState,
@@ -104,6 +110,18 @@ export default function TopBar({
 
         <div className="ml-auto flex items-center gap-1.5">
           <SaveBadge state={saveState} />
+          <IconButton
+            label={showPrevious ? "Hide the previous day" : "Show the previous day"}
+            size="sm"
+            onClick={onTogglePrevious}
+            className={showPrevious ? "text-accent" : undefined}
+          >
+            {showPrevious ? (
+              <LuPanelLeftClose className="h-4 w-4" />
+            ) : (
+              <LuPanelLeftOpen className="h-4 w-4" />
+            )}
+          </IconButton>
           <Button
             size="sm"
             onClick={onCarryOver}
