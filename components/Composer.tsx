@@ -2,17 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LuUsers } from "react-icons/lu";
-import Modal from "./Modal";
-import PeopleManager from "./PeopleManager";
+import Link from "next/link";
+import PaneGrid from "./layout/PaneGrid";
 import PersonCard from "./PersonCard";
 import PreviewPane from "./PreviewPane";
 import PreviousDayPanel from "./PreviousDayPanel";
-import ProjectSettings from "./ProjectSettings";
-import TopBar from "./TopBar";
-import PaneGrid from "./layout/PaneGrid";
-import { Button, EmptyState, Field, Key, inputClass } from "./ui";
+import StandupToolbar from "./StandupToolbar";
 import { useToast } from "./Toast";
-import { useDebouncedSave } from "@/lib/useDebouncedSave";
+import { useReportSave } from "./shell/SaveProvider";
+import { EmptyState, Key } from "./ui";
 import { copyPlain, copyRich } from "@/lib/clipboard";
 import { addDays, formatDisplayDate, isValidISODate, todayISO } from "@/lib/date";
 import {
@@ -26,9 +24,23 @@ import {
   type RenderInput,
   type RenderOptions,
 } from "@/lib/format";
-import { SECTION_KEYS, emptyEntry, type Entry, type EntryText, type Person, type Project } from "@/lib/types";
+import { useDebouncedSave } from "@/lib/useDebouncedSave";
+import {
+  SECTION_KEYS,
+  emptyEntry,
+  type Entry,
+  type EntryText,
+  type Person,
+  type Project,
+} from "@/lib/types";
 
 const PREFS_KEY = "standup.prefs.v1";
+
+interface PendingSave extends EntryText {
+  projectId: string;
+  date: string;
+  personId: string;
+}
 
 /** Defined at module scope so `useDebouncedSave`'s flush stays stable across renders. */
 async function saveEntry(item: PendingSave): Promise<void> {
@@ -39,18 +51,6 @@ async function saveEntry(item: PendingSave): Promise<void> {
     keepalive: true,
   });
   if (!res.ok) throw new Error(`PUT /api/entries -> ${res.status}`);
-}
-
-interface PendingSave extends EntryText {
-  projectId: string;
-  date: string;
-  personId: string;
-}
-
-export interface CurrentUser {
-  id: string;
-  name: string;
-  role: string;
 }
 
 interface Prefs {
@@ -66,9 +66,12 @@ function initialDate(): string {
   return isValidISODate(fromUrl) ? fromUrl : todayISO();
 }
 
-/** Read once during the first render — the loading screen looks the same either way. */
 function loadPrefs(): Prefs {
-  const fallback: Prefs = { options: DEFAULT_RENDER_OPTIONS, flavor: "rich", showPrevious: true };
+  const fallback: Prefs = {
+    options: DEFAULT_RENDER_OPTIONS,
+    flavor: "rich",
+    showPrevious: true,
+  };
   if (typeof window === "undefined") return fallback;
   try {
     const raw = window.localStorage.getItem(PREFS_KEY);
@@ -84,45 +87,33 @@ function loadPrefs(): Prefs {
   }
 }
 
-export default function Composer({ currentUser }: { currentUser: CurrentUser }) {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState<string | null>(null);
+export default function Composer({ project }: { project: Project }) {
   const [date, setDate] = useState<string>(initialDate);
   const [entries, setEntries] = useState<Record<string, Entry>>({});
   const [carry, setCarry] = useState<{ from: string | null; entries: Record<string, Entry> }>({
     from: null,
     entries: {},
   });
-  const [loading, setLoading] = useState(true);
   const [options, setOptions] = useState<RenderOptions>(() => loadPrefs().options);
   const [flavor, setFlavor] = useState<CopyFlavor>(() => loadPrefs().flavor);
   const [showPrevious, setShowPrevious] = useState(() => loadPrefs().showPrevious);
   const [copied, setCopied] = useState<string | null>(null);
-  const [peopleOpen, setPeopleOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [newProjectName, setNewProjectName] = useState("");
-  const [newProjectPeople, setNewProjectPeople] = useState("");
-
-  const project = useMemo(
-    () => projects.find((p) => p.id === projectId) ?? null,
-    [projects, projectId],
-  );
-  const activePeople = useMemo(
-    () => (project?.people ?? []).filter((p) => p.active),
-    [project],
-  );
 
   const toast = useToast();
+  const reportSave = useReportSave();
+  const projectId = project.id;
+  const activePeople = useMemo(() => project.people.filter((p) => p.active), [project]);
 
   /* ---------------- persistence of edits ---------------- */
 
   const entriesRef = useRef<Record<string, Entry>>({});
   const { queue, flush, state: saveState } = useDebouncedSave<PendingSave>({ save: saveEntry });
 
+  // One badge in the global bar, fed by whichever editor is active.
+  useEffect(() => reportSave(saveState), [saveState, reportSave]);
+
   const updateEntry = useCallback(
     (personId: string, patch: Partial<EntryText>) => {
-      if (!projectId) return;
       const current = entriesRef.current[personId] ?? emptyEntry();
       const next: Entry = { ...current, ...patch };
       entriesRef.current = { ...entriesRef.current, [personId]: next };
@@ -135,42 +126,9 @@ export default function Composer({ currentUser }: { currentUser: CurrentUser }) 
     [projectId, date, queue],
   );
 
-  /* ---------------- initial load ---------------- */
-
-  useEffect(() => {
-    const urlProject = new URL(window.location.href).searchParams.get("project");
-
-    (async () => {
-      try {
-        const res = await fetch("/api/projects");
-        const data = (await res.json()) as { projects: Project[]; lastProjectId: string | null };
-        setProjects(data.projects);
-        const chosen =
-          data.projects.find((p) => p.id === urlProject)?.id ??
-          data.projects.find((p) => p.id === data.lastProjectId)?.id ??
-          data.projects[0]?.id ??
-          null;
-        setProjectId(chosen);
-      } catch {
-        toast("Could not reach the server.");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [toast]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify({ options, flavor, showPrevious }));
-    } catch {
-      /* private mode */
-    }
-  }, [options, flavor, showPrevious]);
-
   /* ---------------- load a day ---------------- */
 
   useEffect(() => {
-    if (!projectId) return; // the empty state is showing; nothing reads entries
     let cancelled = false;
 
     (async () => {
@@ -217,7 +175,6 @@ export default function Composer({ currentUser }: { currentUser: CurrentUser }) 
 
   // Keep the URL in step so a day is bookmarkable, without a router round-trip.
   useEffect(() => {
-    if (!projectId) return;
     const url = new URL(window.location.href);
     url.searchParams.set("project", projectId);
     url.searchParams.set("date", date);
@@ -229,20 +186,24 @@ export default function Composer({ currentUser }: { currentUser: CurrentUser }) 
     }).catch(() => undefined);
   }, [projectId, date]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ options, flavor, showPrevious }));
+    } catch {
+      /* private mode */
+    }
+  }, [options, flavor, showPrevious]);
+
   /* ---------------- rendering the update ---------------- */
 
-  const renderInput: RenderInput | null = useMemo(
-    () => (project ? { project, dateISO: date, people: project.people, entries } : null),
+  const renderInput: RenderInput = useMemo(
+    () => ({ project, dateISO: date, people: project.people, entries }),
     [project, date, entries],
   );
-
-  const doc = useMemo(
-    () => (renderInput ? buildDoc(renderInput, options) : null),
-    [renderInput, options],
-  );
-  const html = useMemo(() => (doc ? renderHtml(doc) : ""), [doc]);
-  const text = useMemo(() => (doc ? renderPlainText(doc, flavor) : ""), [doc, flavor]);
-  const isEmpty = !doc || docIsEmpty(doc);
+  const doc = useMemo(() => buildDoc(renderInput, options), [renderInput, options]);
+  const html = useMemo(() => renderHtml(doc), [doc]);
+  const text = useMemo(() => renderPlainText(doc, flavor), [doc, flavor]);
+  const isEmpty = docIsEmpty(doc);
 
   const showCopied = useCallback((key: string) => {
     setCopied(key);
@@ -261,15 +222,12 @@ export default function Composer({ currentUser }: { currentUser: CurrentUser }) 
   );
 
   const copyAll = useCallback(() => {
-    if (!doc || docIsEmpty(doc)) return;
+    if (docIsEmpty(doc)) return;
     void copyDoc("all", doc);
   }, [doc, copyDoc]);
 
   const copyPerson = useCallback(
-    (personId: string) => {
-      if (!renderInput) return;
-      void copyDoc(personId, buildPersonDoc(renderInput, personId, options));
-    },
+    (personId: string) => void copyDoc(personId, buildPersonDoc(renderInput, personId, options)),
     [renderInput, options, copyDoc],
   );
 
@@ -290,7 +248,7 @@ export default function Composer({ currentUser }: { currentUser: CurrentUser }) 
     return () => window.removeEventListener("keydown", onKey);
   }, [copyAll, flush]);
 
-  /* ---------------- actions ---------------- */
+  /* ---------------- carry over ---------------- */
 
   const carryOne = useCallback(
     (person: Person) => {
@@ -319,93 +277,11 @@ export default function Composer({ currentUser }: { currentUser: CurrentUser }) 
     );
   }, [activePeople, carry, updateEntry, toast]);
 
-  const patchProject = useCallback(
-    async (id: string, patch: Record<string, unknown>) => {
-      const res = await fetch(`/api/projects/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) {
-        toast("That change did not save.");
-        return;
-      }
-      const { project: updated } = (await res.json()) as { project: Project };
-      setProjects((list) => list.map((p) => (p.id === updated.id ? updated : p)));
-    },
-    [toast],
-  );
-
-  const createProject = useCallback(async () => {
-    const name = newProjectName.trim();
-    if (!name) return;
-    const people = newProjectPeople
-      .split(/[\n,]/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const res = await fetch("/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, people }),
-    });
-    if (!res.ok) {
-      toast("Could not create that project.");
-      return;
-    }
-    const { project: created } = (await res.json()) as { project: Project };
-    setProjects((list) => [...list, created]);
-    setProjectId(created.id);
-    setNewProjectOpen(false);
-    setNewProjectName("");
-    setNewProjectPeople("");
-  }, [newProjectName, newProjectPeople, toast]);
-
-  const removeProject = useCallback(async () => {
-    if (!project) return;
-    const res = await fetch(`/api/projects/${project.id}`, { method: "DELETE" });
-    if (!res.ok) {
-      toast("Could not delete that project.");
-      return;
-    }
-    const remaining = projects.filter((p) => p.id !== project.id);
-    setProjects(remaining);
-    setProjectId(remaining[0]?.id ?? null);
-  }, [project, projects, toast]);
-
   /* ---------------- render ---------------- */
 
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center text-[13px] text-muted">
-        Loading…
-      </div>
-    );
-  }
-
-  if (!project) {
-    return (
-      <>
-        <EmptyProjects onCreate={() => setNewProjectOpen(true)} />
-        <NewProjectModal
-          open={newProjectOpen}
-          onClose={() => setNewProjectOpen(false)}
-          name={newProjectName}
-          onNameChange={setNewProjectName}
-          people={newProjectPeople}
-          onPeopleChange={setNewProjectPeople}
-          onCreate={createProject}
-        />
-      </>
-    );
-  }
-
   return (
-    <div className="flex min-h-screen flex-col lg:h-screen lg:min-h-0 lg:overflow-hidden">
-      <TopBar
-        projects={projects}
-        projectId={project.id}
-        onProjectChange={setProjectId}
-        onNewProject={() => setNewProjectOpen(true)}
+    <>
+      <StandupToolbar
         date={date}
         onDateChange={(d) => isValidISODate(d) && setDate(d)}
         onStepDate={(delta) => setDate((d) => addDays(d, delta))}
@@ -415,13 +291,8 @@ export default function Composer({ currentUser }: { currentUser: CurrentUser }) 
         onCarryOver={carryAll}
         showPrevious={showPrevious}
         onTogglePrevious={() => setShowPrevious((v) => !v)}
-        onManagePeople={() => setPeopleOpen(true)}
-        onOpenSettings={() => setSettingsOpen(true)}
-        saveState={saveState}
-        currentUser={currentUser}
       />
 
-      {/* Two independent scroll panes on a wide screen; one ordinary page below that. */}
       <PaneGrid
         columns={showPrevious ? "aside+main+detail" : "main+detail"}
         aside={
@@ -456,9 +327,12 @@ export default function Composer({ currentUser }: { currentUser: CurrentUser }) 
               title="No one on this standup yet"
               body="Add the people who report in this standup."
               action={
-                <Button variant="primary" onClick={() => setPeopleOpen(true)}>
+                <Link
+                  href={`/team?project=${encodeURIComponent(projectId)}`}
+                  className="inline-flex h-8 items-center rounded-lg bg-accent px-3 text-[13px] font-medium text-accent-contrast transition hover:brightness-110"
+                >
                   Add people
-                </Button>
+                </Link>
               }
             />
           ) : (
@@ -494,104 +368,11 @@ export default function Composer({ currentUser }: { currentUser: CurrentUser }) 
               <Key>Backspace</Key> over the <code className="font-mono">-</code> makes a sub-header
             </span>
             <span>
-              <Key>{"\u2318"}</Key>+<Key>Shift</Key>+<Key>C</Key> copy everything
+              <Key>{"⌘"}</Key>+<Key>Shift</Key>+<Key>C</Key> copy everything
             </span>
           </div>
         </>
       </PaneGrid>
-
-      <PeopleManager
-        open={peopleOpen}
-        onClose={() => setPeopleOpen(false)}
-        people={project.people}
-        onSave={(people) => patchProject(project.id, { people })}
-      />
-      <ProjectSettings
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        project={project}
-        onSave={(patch) => patchProject(project.id, patch)}
-        onDelete={removeProject}
-      />
-      <NewProjectModal
-        open={newProjectOpen}
-        onClose={() => setNewProjectOpen(false)}
-        name={newProjectName}
-        onNameChange={setNewProjectName}
-        people={newProjectPeople}
-        onPeopleChange={setNewProjectPeople}
-        onCreate={createProject}
-      />
-
-    </div>
-  );
-}
-
-function EmptyProjects({ onCreate }: { onCreate: () => void }) {
-  return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-3 px-6 text-center">
-      <h1 className="text-lg font-semibold">No projects yet</h1>
-      <p className="max-w-sm text-[13px] text-muted">
-        A project holds one team&apos;s standup — its people, its heading, and every day you write.
-      </p>
-      <Button variant="primary" size="lg" onClick={onCreate}>
-        Create a project
-      </Button>
-    </div>
-  );
-}
-
-function NewProjectModal({
-  open,
-  onClose,
-  name,
-  onNameChange,
-  people,
-  onPeopleChange,
-  onCreate,
-}: {
-  open: boolean;
-  onClose: () => void;
-  name: string;
-  onNameChange: (v: string) => void;
-  people: string;
-  onPeopleChange: (v: string) => void;
-  onCreate: () => void;
-}) {
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="New project"
-      footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={onCreate} disabled={!name.trim()}>
-            Create
-          </Button>
-        </>
-      }
-    >
-      <div className="flex flex-col gap-4">
-        <Field label="Project name">
-          <input
-            value={name}
-            onChange={(e) => onNameChange(e.target.value)}
-            placeholder="Go Style"
-            className={inputClass}
-            data-autofocus
-          />
-        </Field>
-        <Field label="People" hint="One per line, or comma separated. You can change these later.">
-          <textarea
-            value={people}
-            onChange={(e) => onPeopleChange(e.target.value)}
-            rows={5}
-            placeholder={"Nihal\nNazirul\nSaad"}
-            className="w-full resize-y rounded-lg border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
-          />
-        </Field>
-      </div>
-    </Modal>
+    </>
   );
 }

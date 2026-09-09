@@ -562,8 +562,19 @@ export function updateProject(id: string, patch: ProjectPatch): Project | null {
         upsert.run(personId, id, person.name, person.active ? 1 : 0, index);
       });
 
+      // Removing someone from the roster must not destroy what they wrote. In a
+      // single-user app a confirm dialog was enough; once colleagues share a project,
+      // one person must not be able to erase another's history that easily. A row with
+      // entries is deactivated — which is what the app already promises "unticking"
+      // does — and only a row that has never written anything is actually deleted.
+      const hasEntries = db.prepare("SELECT 1 FROM entries WHERE person_id = ? LIMIT 1");
       for (const staleId of existing) {
-        if (!keep.has(staleId)) db.prepare("DELETE FROM people WHERE id = ?").run(staleId);
+        if (keep.has(staleId)) continue;
+        if (hasEntries.get(staleId) === undefined) {
+          db.prepare("DELETE FROM people WHERE id = ?").run(staleId);
+        } else {
+          db.prepare("UPDATE people SET active = 0 WHERE id = ?").run(staleId);
+        }
       }
     }
   });
