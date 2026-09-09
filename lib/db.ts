@@ -439,6 +439,9 @@ let txDepth = 0;
  * Nested calls use SAVEPOINT, since SQLite has no nested BEGIN.
  */
 export function withWrite<T>(fn: (db: DatabaseSync) => T): T {
+  // Cheap next to the transaction that follows, and the only place the vanished-file
+  // case can still bite: reads keep working against the unlinked inode, writes do not.
+  if (txDepth === 0) discardStaleHandle();
   const db = open();
 
   if (txDepth > 0) {
@@ -697,16 +700,87 @@ const globalRef = globalThis as typeof globalThis & {
  */
 let columnsChecked = false;
 
+/**
+ * Turn a startup failure into something a person can act on.
+ *
+ * Everything below runs on the first query of the process, so anything that throws here
+ * takes down every page with a stack trace pointing at whichever statement happened to
+ * be first — an ALTER TABLE, usually, which says nothing about the real problem. The
+ * causes are all environmental and all diagnosable, so name them.
+ */
+function describeOpenFailure(err: unknown): Error {
+  const reason = err instanceof Error ? err.message : String(err);
+  const exists = fs.existsSync(DB_FILE);
+
+  let hint: string;
+  if (/readonly|attempt to write/i.test(reason)) {
+    hint = exists
+      ? "The file exists but cannot be written. Check its permissions, and whether it was " +
+        "moved or deleted while the server held it open — SQLite reports that as readonly too."
+      : "The file is gone. If a previous run pointed STANDUP_DB_FILE at a temporary path " +
+        "that has since been cleaned up, unset it so the app uses data/standup.db.";
+  } else if (/unable to open|no such file/i.test(reason)) {
+    hint = "The path could not be opened at all. Check that its directory exists and is writable.";
+  } else if (/disk|full|no space/i.test(reason)) {
+    hint = "The disk appears to be full.";
+  } else {
+    hint = "The database could not be prepared for use.";
+  }
+
+  return new Error(
+    `Cannot open the database at ${DB_FILE} (${exists ? "file exists" : "file is missing"}).\n` +
+      `${hint}\nSQLite said: ${reason}`,
+    { cause: err },
+  );
+}
+
+/**
+ * Drop a cached handle whose file is no longer there.
+ *
+ * SQLite refuses to write through a connection whose database has been deleted or
+ * renamed underneath it — SQLITE_READONLY_DBMOVED, which surfaces as "attempt to write
+ * a readonly database" and reads like a permissions problem it is not. That happens in
+ * development whenever something removes the file while the server holds it open (a
+ * cleaned-up temporary database, a restore, a branch switch), and the handle survives
+ * because it is cached on globalThis to outlive hot reloads. Reopening is the correct
+ * response, and the only one that does not require restarting the server.
+ */
+function discardStaleHandle(): void {
+  const cached = globalRef.__standupDb;
+  if (!cached || fs.existsSync(DB_FILE)) return;
+  try {
+    cached.close();
+  } catch {
+    /* already unusable; the point is to stop handing it out */
+  }
+  delete globalRef.__standupDb;
+  columnsChecked = false;
+}
+
 function open(): DatabaseSync {
   const cached = globalRef.__standupDb;
   if (cached) {
     if (!columnsChecked) {
-      addMissingColumns(cached);
+      discardStaleHandle();
+      if (!globalRef.__standupDb) return open();
+      try {
+        addMissingColumns(cached);
+      } catch (err) {
+        throw describeOpenFailure(err);
+      }
       columnsChecked = true;
     }
     return cached;
   }
 
+  try {
+    return bootstrap();
+  } catch (err) {
+    throw describeOpenFailure(err);
+  }
+}
+
+function bootstrap(): DatabaseSync {
   fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
   const db = new DatabaseSync(DB_FILE);
 
@@ -730,6 +804,12 @@ function open(): DatabaseSync {
   seedIfEmpty(db);
   backfillProjectTrackerDefaults(db);
   registerShutdown(db);
+
+  // Which file is in use is the first thing anyone needs when the data looks wrong, and
+  // the hardest thing to discover once the server is running. One line, on the way up.
+  if (process.env.NODE_ENV !== "production") {
+    console.info(`[db] ${DB_FILE}`);
+  }
   return db;
 }
 
