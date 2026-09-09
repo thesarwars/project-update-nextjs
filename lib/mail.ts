@@ -3,6 +3,7 @@ import { connect as tlsConnect, type TLSSocket } from "node:tls";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import path from "node:path";
+import { serverError, serverLog } from "./serverLog";
 
 /**
  * Mail, without a mail library.
@@ -68,7 +69,7 @@ export async function sendMail(mail: Mail): Promise<void> {
     try {
       return await sendViaResend(resend, mail);
     } catch (err) {
-      console.error("Resend refused the message:", err);
+      serverError("Resend refused the message:", err);
       return writeToOutbox(mail);
     }
   }
@@ -79,7 +80,7 @@ export async function sendMail(mail: Mail): Promise<void> {
   try {
     return await sendViaSmtp(transport, mail);
   } catch (err) {
-    console.error("SMTP refused the message:", err);
+    serverError("SMTP refused the message:", err);
     return writeToOutbox(mail);
   }
 }
@@ -193,7 +194,7 @@ function writeToOutbox(mail: Mail): void {
     `\n──────── mail (SMTP_HOST is not set, so nothing was sent) ────────\n` +
     `To: ${mail.to}\nSubject: ${mail.subject}\n\n${mail.text}\n` +
     `──────────────────────────────────────────────────────────────────\n`;
-  console.info(banner);
+  serverLog(banner);
 
   try {
     const dir = path.join(process.cwd(), "data", "outbox");

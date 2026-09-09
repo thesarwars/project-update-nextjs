@@ -4,6 +4,7 @@ import { endOfSprint, type DurationUnit } from "./date";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { serverLog } from "./serverLog";
 import {
   DEFAULT_LABELS,
   DEFAULT_STATUSES,
@@ -807,9 +808,11 @@ function bootstrap(): DatabaseSync {
 
   // Which file is in use is the first thing anyone needs when the data looks wrong, and
   // the hardest thing to discover once the server is running. One line, on the way up.
-  if (process.env.NODE_ENV !== "production") {
-    console.info(`[db] ${DB_FILE}`);
-  }
+  //
+  // Straight to stdout rather than console.info: this runs inside a Server Component
+  // render, and in development React forwards console calls from there into the
+  // browser. See lib/serverLog.ts.
+  if (process.env.NODE_ENV !== "production") serverLog(`[db] ${DB_FILE}`);
   return db;
 }
 
