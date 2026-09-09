@@ -100,27 +100,53 @@ export async function requireUser(nextPath?: string): Promise<User> {
 
 export type SignInResult =
   | { ok: true; user: User }
-  | { ok: false; reason: "invalid" | "disabled" | "rate-limited" };
+  | { ok: false; reason: "invalid" | "disabled" | "rate-limited" | "unverified"; userId?: string };
 
-/** In-process and per-process, which is right for a single-process deployment. */
-const attempts = new Map<string, { count: number; firstAt: number }>();
+/* ------------------------------------------------------------------ *
+ * Throttling
+ * ------------------------------------------------------------------ */
+
+/**
+ * In-process and per-process, which is right for a single-process deployment and wrong
+ * the day this runs behind two of them. It is a speed bump against guessing and mail
+ * flooding, not a quota — the durable limits are the per-code attempt counter and the
+ * ten-minute expiry, which live in the database and survive a restart.
+ */
+const buckets = new Map<string, { count: number; firstAt: number }>();
+
+/** Records the hit and reports whether it should be refused. */
+export function throttle(key: string, max: number, windowMs: number): boolean {
+  const record = buckets.get(key);
+  if (!record || Date.now() - record.firstAt > windowMs) {
+    buckets.set(key, { count: 1, firstAt: Date.now() });
+    return false;
+  }
+  record.count += 1;
+  return record.count > max;
+}
+
+/** Undo a throttle bucket, so a success does not count against the next attempt. */
+export function clearThrottle(key: string): void {
+  buckets.delete(key);
+}
+
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
 
 function rateLimited(key: string): boolean {
-  const record = attempts.get(key);
+  const record = buckets.get(key);
   if (!record) return false;
   if (Date.now() - record.firstAt > WINDOW_MS) {
-    attempts.delete(key);
+    buckets.delete(key);
     return false;
   }
   return record.count >= MAX_ATTEMPTS;
 }
 
 function recordFailure(key: string): void {
-  const record = attempts.get(key);
+  const record = buckets.get(key);
   if (!record || Date.now() - record.firstAt > WINDOW_MS) {
-    attempts.set(key, { count: 1, firstAt: Date.now() });
+    buckets.set(key, { count: 1, firstAt: Date.now() });
     return;
   }
   record.count += 1;
@@ -142,7 +168,15 @@ export async function signIn(email: string, password: string): Promise<SignInRes
   }
   if (found.user.status === "disabled") return { ok: false, reason: "disabled" };
 
-  attempts.delete(key);
+  // The password was right, so telling them the address is unverified reveals nothing
+  // they did not already know — and sending them to the code screen is the only useful
+  // thing to do with a correct password on an unfinished account.
+  if (!found.user.emailVerifiedAt) {
+    buckets.delete(key);
+    return { ok: false, reason: "unverified", userId: found.user.id };
+  }
+
+  buckets.delete(key);
   await startSession(found.user.id);
   return { ok: true, user: found.user };
 }

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import AuthForm from "../AuthForm";
 import { loginAction } from "@/lib/actions/auth";
@@ -15,12 +16,27 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
 
   const { next } = await searchParams;
   return (
-    <AuthForm
-      action={loginAction}
-      title="Sign in"
-      submitLabel="Sign in"
-      autoComplete="current-password"
-      next={typeof next === "string" ? next : undefined}
-    />
+    <>
+      <AuthForm
+        action={loginAction}
+        title="Sign in"
+        submitLabel="Sign in"
+        autoComplete="current-password"
+        next={typeof next === "string" ? next : undefined}
+        footer={
+          <p className="text-center text-[12.5px]">
+            <Link href="/forgot" className="font-medium text-accent hover:underline">
+              Forgot your password?
+            </Link>
+          </p>
+        }
+      />
+      <p className="mt-4 text-center text-[12.5px] text-muted">
+        No account yet?{" "}
+        <Link href="/signup" className="font-medium text-accent hover:underline">
+          Create one
+        </Link>
+      </p>
+    </>
   );
 }

@@ -17,7 +17,7 @@ export default async function SetupPage() {
     <AuthForm
       action={setupAction}
       title="Create the first account"
-      intro="This account is the administrator. Everyone else joins by invitation."
+      intro="This account is the administrator. Everyone else signs up or joins by invitation."
       submitLabel="Create account and sign in"
       autoComplete="new-password"
       passwordHint="At least 10 characters."

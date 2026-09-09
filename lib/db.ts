@@ -123,6 +123,24 @@ CREATE TABLE IF NOT EXISTS invites (
 );
 CREATE INDEX IF NOT EXISTS invites_by_person ON invites(person_id);
 
+-- One-time codes for email verification and password reset.
+--
+-- Only the SHA-256 is stored, on the same reasoning as sessions and invites. The attempt
+-- counter is what makes a six-digit secret defensible: guessing is capped long before a
+-- million tries, so the code can stay short enough to read off a phone.
+CREATE TABLE IF NOT EXISTS email_codes (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  -- 'verify' | 'reset'
+  purpose     TEXT NOT NULL,
+  code_hash   TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS email_codes_live ON email_codes(user_id, purpose, consumed_at);
+
 -- Reference data, seeded from constants in lib/types.ts. It lives in tables rather than
 -- in code so the rules can be read by a trigger, and changed without a deploy.
 CREATE TABLE IF NOT EXISTS issue_types (
@@ -337,6 +355,9 @@ const EXTRA_COLUMNS: { table: string; column: string; ddl: string }[] = [
   { table: "people", column: "user_id", ddl: "TEXT REFERENCES users(id) ON DELETE SET NULL" },
   // Rendered as the prefix in GS-142. Nullable so the column can be added to an existing
   // table; the migration fills it in.
+  // When the address was proven, by clicking through a code we mailed to it. NULL means
+  // the account is not usable yet, which is what stops someone signing up as a colleague.
+  { table: "users", column: "email_verified_at", ddl: "TEXT" },
   { table: "projects", column: "key", ddl: "TEXT" },
   { table: "projects", column: "next_issue_number", ddl: "INTEGER NOT NULL DEFAULT 1" },
 ];
@@ -504,6 +525,20 @@ const MIGRATIONS: Migration[] = [
       // Per-project defaults are handled by the backfill below rather than here: this
       // migration runs before the first project exists on a fresh database, and the
       // backfill has to cover projects created later anyway.
+    },
+  },
+  {
+    version: 2,
+    name: "grandfather existing accounts past email verification",
+    up(db) {
+      // Verification arrived after these accounts did. Without this they would all read
+      // as unverified, which locks out everyone who already has a password and — far
+      // worse — marks their address as free for a stranger to sign up with.
+      db.exec(
+        `UPDATE users
+            SET email_verified_at = created_at
+          WHERE email_verified_at IS NULL AND password_hash IS NOT NULL`,
+      );
     },
   },
 ];
@@ -1085,6 +1120,7 @@ function toUser(r: Row): User {
     role: (String(r.role) === "admin" ? "admin" : "member") as Role,
     status: String(r.status) as UserStatus,
     hasPassword: r.password_hash != null && String(r.password_hash).length > 0,
+    emailVerifiedAt: r.email_verified_at == null ? null : String(r.email_verified_at),
     createdAt: String(r.created_at),
     lastLoginAt: r.last_login_at == null ? null : String(r.last_login_at),
   };
@@ -1105,6 +1141,13 @@ export function getUser(id: string): User | null {
   const row = open().prepare("SELECT * FROM users WHERE id = ?").get(id) as unknown as
     | Row
     | undefined;
+  return row ? toUser(row) : null;
+}
+
+export function findUserByEmail(email: string): User | null {
+  const row = open()
+    .prepare("SELECT * FROM users WHERE lower(email) = lower(?)")
+    .get(email) as unknown as Row | undefined;
   return row ? toUser(row) : null;
 }
 
@@ -1160,10 +1203,14 @@ export function createFirstAdmin(input: Omit<NewUser, "role" | "status">): User 
   const result = withWrite((tx) => {
     const { n } = tx.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number };
     if (n > 0) return "already-setup" as const;
+    // Verified on creation, and only here. Setup runs once, at the console, before any
+    // mail account necessarily exists — demanding a code first would make the app
+    // impossible to bootstrap on a machine that cannot yet send mail.
+    const now = new Date().toISOString();
     tx.prepare(
-      `INSERT INTO users (id, email, name, password_hash, role, status, created_at)
-       VALUES (?, ?, ?, ?, 'admin', 'active', ?)`,
-    ).run(id, input.email, input.name, input.passwordHash, new Date().toISOString());
+      `INSERT INTO users (id, email, name, password_hash, role, status, created_at, email_verified_at)
+       VALUES (?, ?, ?, ?, 'admin', 'active', ?, ?)`,
+    ).run(id, input.email, input.name, input.passwordHash, now, now);
     return "created" as const;
   });
   return result === "already-setup" ? result : getUser(id)!;
@@ -1177,6 +1224,172 @@ export function setUserPassword(userId: string, passwordHash: string): void {
     );
     // A password change invalidates every other session for that account.
     tx.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Sign-up and one-time codes
+ * ------------------------------------------------------------------ */
+
+export type SignUpResult =
+  | { ok: true; user: User; reused: boolean }
+  | { ok: false; reason: "already-verified" };
+
+/**
+ * Register an address, or take over a registration that was never finished.
+ *
+ * An unverified row is not yet an account — nobody has proved they own the address, so
+ * whoever proves it first gets it. That covers three cases with one rule: signing up
+ * twice because the first code never arrived, a stranger squatting on a colleague's
+ * address (they cannot verify it, and the real owner just signs up again), and an
+ * invited roster row that was never claimed.
+ *
+ * A verified address is refused. The caller must still answer the browser identically
+ * either way, or the form becomes a test for who works here.
+ */
+export function signUpUser(input: {
+  email: string;
+  name: string;
+  passwordHash: string;
+}): SignUpResult {
+  const now = new Date().toISOString();
+  const id = newId("usr");
+
+  const outcome = withWrite((tx) => {
+    const existing = tx
+      .prepare("SELECT id, email_verified_at FROM users WHERE lower(email) = lower(?)")
+      .get(input.email) as { id: string; email_verified_at: string | null } | undefined;
+
+    if (existing?.email_verified_at) return { ok: false as const, reason: "already-verified" as const };
+
+    if (existing) {
+      tx.prepare(
+        "UPDATE users SET name = ?, password_hash = ?, email = ?, status = 'active' WHERE id = ?",
+      ).run(input.name, input.passwordHash, input.email, existing.id);
+      // Any code issued to the previous attempt is void — it was mailed for a password
+      // that no longer exists.
+      tx.prepare("DELETE FROM email_codes WHERE user_id = ?").run(existing.id);
+      return { ok: true as const, id: existing.id, reused: true };
+    }
+
+    tx.prepare(
+      `INSERT INTO users (id, email, name, password_hash, role, status, created_at)
+       VALUES (?, ?, ?, ?, 'member', 'active', ?)`,
+    ).run(id, input.email, input.name, input.passwordHash, now);
+    return { ok: true as const, id, reused: false };
+  });
+
+  if (!outcome.ok) return outcome;
+  return { ok: true, user: getUser(outcome.id)!, reused: outcome.reused };
+}
+
+export type CodePurpose = "verify" | "reset";
+
+export interface EmailCode {
+  id: string;
+  userId: string;
+  purpose: CodePurpose;
+  codeHash: string;
+  expiresAt: string;
+  attempts: number;
+}
+
+/**
+ * Issue a code, replacing any earlier one for the same purpose.
+ *
+ * Exactly one live code per purpose, deliberately: several valid codes at once multiplies
+ * an attacker's chances by however many times the user pressed Resend.
+ */
+export function createEmailCode(input: {
+  userId: string;
+  purpose: CodePurpose;
+  codeHash: string;
+  expiresAt: string;
+}): void {
+  withWrite((tx) => {
+    tx.prepare("DELETE FROM email_codes WHERE user_id = ? AND purpose = ?").run(
+      input.userId,
+      input.purpose,
+    );
+    tx.prepare(
+      `INSERT INTO email_codes (id, user_id, purpose, code_hash, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(newId("cod"), input.userId, input.purpose, input.codeHash, new Date().toISOString(), input.expiresAt);
+  });
+}
+
+export function findLiveEmailCode(userId: string, purpose: CodePurpose): EmailCode | null {
+  const row = open()
+    .prepare(
+      `SELECT * FROM email_codes
+        WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL AND expires_at > ?
+        ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(userId, purpose, new Date().toISOString()) as unknown as Row | undefined;
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    purpose: String(row.purpose) as CodePurpose,
+    codeHash: String(row.code_hash),
+    expiresAt: String(row.expires_at),
+    attempts: Number(row.attempts),
+  };
+}
+
+/** Returns how many attempts that code has now had, including this one. */
+export function recordCodeAttempt(id: string): number {
+  return withWrite((tx) => {
+    const row = tx
+      .prepare("UPDATE email_codes SET attempts = attempts + 1 WHERE id = ? RETURNING attempts")
+      .get(id) as { attempts: number } | undefined;
+    return row ? Number(row.attempts) : 0;
+  });
+}
+
+/** Burn the code. Separate from the thing it authorises, so both share one transaction. */
+export function consumeEmailCode(id: string): void {
+  withWrite((tx) =>
+    tx
+      .prepare("UPDATE email_codes SET consumed_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), id),
+  );
+}
+
+export function deleteEmailCodes(userId: string, purpose: CodePurpose): void {
+  withWrite((tx) =>
+    tx.prepare("DELETE FROM email_codes WHERE user_id = ? AND purpose = ?").run(userId, purpose),
+  );
+}
+
+/** Marks the address proven. Idempotent: a second verification keeps the first date. */
+export function markEmailVerified(userId: string): void {
+  withWrite((tx) =>
+    tx
+      .prepare(
+        "UPDATE users SET email_verified_at = ?, status = 'active' WHERE id = ? AND email_verified_at IS NULL",
+      )
+      .run(new Date().toISOString(), userId),
+  );
+}
+
+/**
+ * Set a new password after a reset, ending every existing session in the same breath.
+ *
+ * Resetting is what you do when you suspect someone else is in the account, so leaving
+ * their session alive would defeat the point. Verification rides along: receiving the
+ * code proved the address just as well as the signup code would have.
+ */
+export function resetUserPassword(userId: string, passwordHash: string): void {
+  withWrite((tx) => {
+    tx.prepare(
+      `UPDATE users
+          SET password_hash = ?, status = 'active',
+              email_verified_at = COALESCE(email_verified_at, ?)
+        WHERE id = ?`,
+    ).run(passwordHash, new Date().toISOString(), userId);
+    tx.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+    tx.prepare("DELETE FROM email_codes WHERE user_id = ?").run(userId);
   });
 }
 
@@ -1313,9 +1526,13 @@ export function getInvite(id: string): Invite | null {
 }
 
 /** A live, unaccepted, unexpired invite plus the roster row and project it belongs to. */
-export function findLiveInvite(
-  tokenHash: string,
-): { invite: Invite; personName: string | null; projectName: string | null } | null {
+export function findLiveInvite(tokenHash: string): {
+  invite: Invite;
+  personName: string | null;
+  projectName: string | null;
+  /** True when that address can already sign in, so claiming needs a session. */
+  emailHasAccount: boolean;
+} | null {
   const row = open()
     .prepare(
       `SELECT i.*, p.name AS person_name, pr.name AS project_name
@@ -1326,10 +1543,16 @@ export function findLiveInvite(
     )
     .get(tokenHash, new Date().toISOString()) as unknown as Row | undefined;
   if (!row) return null;
+  const invite = toInvite(row);
+  const existing = open()
+    .prepare("SELECT password_hash FROM users WHERE lower(email) = lower(?)")
+    .get(invite.email) as { password_hash: string | null } | undefined;
+
   return {
-    invite: toInvite(row),
+    invite,
     personName: row.person_name == null ? null : String(row.person_name),
     projectName: row.project_name == null ? null : String(row.project_name),
+    emailHasAccount: Boolean(existing?.password_hash),
   };
 }
 
@@ -1351,7 +1574,7 @@ export function revokeInvite(id: string): void {
 
 export type AcceptResult =
   | { ok: true; userId: string }
-  | { ok: false; reason: "gone" | "seat-taken" | "email-taken" };
+  | { ok: false; reason: "gone" | "seat-taken" | "sign-in-required" };
 
 /**
  * Turn an invite into an account, in one transaction.
@@ -1379,25 +1602,31 @@ export function acceptInvite(input: {
     // An existing account for this address joins the roster row instead of a duplicate
     // being created — that is how one person ends up on two projects.
     const existing = tx
-      .prepare("SELECT id FROM users WHERE lower(email) = lower(?)")
-      .get(invite.email) as { id: string } | undefined;
+      .prepare("SELECT id, password_hash FROM users WHERE lower(email) = lower(?)")
+      .get(invite.email) as { id: string; password_hash: string | null } | undefined;
 
     let userId: string;
     if (existing) {
+      // If that account can already sign in, holding this link is not proof of owning it.
+      // Claiming has to happen while signed in as them — see claimInviteAs.
+      if (existing.password_hash) return { ok: false, reason: "sign-in-required" };
+      // No password yet: invited somewhere else and never claimed, so setting one here is
+      // the same act of claiming, not a takeover.
       userId = existing.id;
+      tx.prepare(
+        `UPDATE users SET password_hash = ?, name = ?, status = 'active',
+                          email_verified_at = COALESCE(email_verified_at, ?)
+          WHERE id = ?`,
+      ).run(input.passwordHash, input.name, new Date().toISOString(), userId);
     } else {
       userId = newId("usr");
+      // Verified: an admin typed this address and issued a link for it, which is the
+      // same assurance the signup code is there to obtain.
+      const now = new Date().toISOString();
       tx.prepare(
-        `INSERT INTO users (id, email, name, password_hash, role, status, created_at)
-         VALUES (?, ?, ?, ?, ?, 'active', ?)`,
-      ).run(
-        userId,
-        invite.email,
-        input.name,
-        input.passwordHash,
-        invite.role,
-        new Date().toISOString(),
-      );
+        `INSERT INTO users (id, email, name, password_hash, role, status, created_at, email_verified_at)
+         VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+      ).run(userId, invite.email, input.name, input.passwordHash, invite.role, now, now);
     }
 
     if (invite.personId) {
@@ -1421,6 +1650,52 @@ export function acceptInvite(input: {
 }
 
 /** The account attached to each roster row, for the People screen. */
+/**
+ * Claim an invitation as the account you are already signed in as.
+ *
+ * The path for someone who already has an account: the session is the proof of identity,
+ * so no password is asked for or changed. The addresses must match, otherwise a link
+ * meant for one person would let another take the seat.
+ */
+export function claimInviteAs(tokenHash: string, userId: string): AcceptResult {
+  return withWrite((tx): AcceptResult => {
+    const row = tx
+      .prepare(
+        "SELECT * FROM invites WHERE token_hash = ? AND accepted_at IS NULL AND expires_at > ?",
+      )
+      .get(tokenHash, new Date().toISOString()) as unknown as Row | undefined;
+    if (!row) return { ok: false, reason: "gone" };
+    const invite = toInvite(row);
+
+    const user = tx.prepare("SELECT email FROM users WHERE id = ?").get(userId) as
+      | { email: string }
+      | undefined;
+    if (!user) return { ok: false, reason: "gone" };
+    if (user.email.toLowerCase() !== invite.email.toLowerCase()) {
+      return { ok: false, reason: "sign-in-required" };
+    }
+
+    if (invite.personId) {
+      const seat = tx.prepare("SELECT user_id FROM people WHERE id = ?").get(invite.personId) as
+        | { user_id: string | null }
+        | undefined;
+      if (!seat) return { ok: false, reason: "gone" };
+      if (seat.user_id && seat.user_id !== userId) return { ok: false, reason: "seat-taken" };
+      tx.prepare("UPDATE people SET user_id = ?, active = 1 WHERE id = ?").run(
+        userId,
+        invite.personId,
+      );
+    }
+
+    tx.prepare("UPDATE invites SET accepted_at = ?, accepted_user_id = ? WHERE id = ?").run(
+      new Date().toISOString(),
+      userId,
+      invite.id,
+    );
+    return { ok: true, userId };
+  });
+}
+
 export function accountsForProject(projectId: string): Record<string, User> {
   const rows = open()
     .prepare(

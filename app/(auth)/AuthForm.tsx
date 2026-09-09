@@ -16,6 +16,10 @@ interface Props {
   autoComplete: "current-password" | "new-password";
   /** False when an earlier field should take focus instead. */
   focusEmail?: boolean;
+  /** The forgotten-password form asks for the address alone. */
+  hidePassword?: boolean;
+  /** Rendered under the submit button — sign-up and forgot-password links. */
+  footer?: React.ReactNode;
 }
 
 export default function AuthForm({
@@ -28,6 +32,8 @@ export default function AuthForm({
   passwordHint,
   autoComplete,
   focusEmail = true,
+  hidePassword = false,
+  footer,
 }: Props) {
   const [state, formAction, pending] = useActionState(action, { error: null });
 
@@ -55,15 +61,17 @@ export default function AuthForm({
         />
       </Field>
 
-      <Field label="Password" hint={passwordHint}>
-        <input
-          name="password"
-          type="password"
-          autoComplete={autoComplete}
-          required
-          className={inputClass}
-        />
-      </Field>
+      {hidePassword ? null : (
+        <Field label="Password" hint={passwordHint}>
+          <input
+            name="password"
+            type="password"
+            autoComplete={autoComplete}
+            required
+            className={inputClass}
+          />
+        </Field>
+      )}
 
       {state.error ? (
         <p role="alert" className="rounded-lg bg-danger/10 px-3 py-2 text-[12.5px] text-danger">
@@ -74,6 +82,8 @@ export default function AuthForm({
       <Button type="submit" variant="primary" size="lg" disabled={pending}>
         {pending ? "Please wait…" : submitLabel}
       </Button>
+
+      {footer}
     </form>
   );
 }

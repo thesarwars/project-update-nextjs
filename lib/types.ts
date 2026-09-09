@@ -70,6 +70,12 @@ export interface User {
   status: UserStatus;
   /** False until the account has a password — an invited user cannot sign in yet. */
   hasPassword: boolean;
+  /**
+   * When the address was proven by entering a code we mailed to it. Null blocks sign-in:
+   * it is what keeps a half-finished signup from becoming a usable account, and what
+   * stops someone claiming a colleague's address by typing it into the signup form.
+   */
+  emailVerifiedAt: string | null;
   createdAt: string;
   lastLoginAt: string | null;
 }
