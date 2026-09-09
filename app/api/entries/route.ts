@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { badRequest, json, notFound, readJsonBody } from "@/lib/api";
+import { badRequest, json, notFound, readJsonBody, requireApiUser } from "@/lib/api";
 import { isValidISODate } from "@/lib/date";
 import {
   datesWithContent,
@@ -14,6 +14,9 @@ import { SECTION_KEYS, type EntryText } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
+  const auth = await requireApiUser(request);
+  if (auth instanceof Response) return auth;
+
   const params = request.nextUrl.searchParams;
   const projectId = params.get("projectId");
   const date = params.get("date");
@@ -32,6 +35,9 @@ export async function GET(request: NextRequest) {
 const MAX_FIELD = 20000;
 
 export async function PUT(request: NextRequest) {
+  const auth = await requireApiUser(request);
+  if (auth instanceof Response) return auth;
+
   const body = await readJsonBody<Record<string, unknown>>(request);
   if (!body) return badRequest("Expected a JSON body.");
   const { projectId, date, personId } = body;

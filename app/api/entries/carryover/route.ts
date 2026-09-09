@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { badRequest, json, notFound } from "@/lib/api";
+import { badRequest, json, notFound, requireApiUser } from "@/lib/api";
 import { isValidISODate } from "@/lib/date";
 import { entriesForDate, previousDateWithContent, projectExists } from "@/lib/db";
 
@@ -10,6 +10,9 @@ export const dynamic = "force-dynamic";
  * person's previous ToDo forward into today.
  */
 export async function GET(request: NextRequest) {
+  const auth = await requireApiUser(request);
+  if (auth instanceof Response) return auth;
+
   const params = request.nextUrl.searchParams;
   const projectId = params.get("projectId");
   const date = params.get("date");

@@ -4,6 +4,10 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_LABELS,
+  type Role,
+  type Session,
+  type User,
+  type UserStatus,
   DEFAULT_TITLE_TEMPLATE,
   SECTION_KEYS,
   type Entry,
@@ -54,6 +58,33 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS users (
+  id            TEXT PRIMARY KEY,
+  email         TEXT NOT NULL,
+  name          TEXT NOT NULL,
+  -- NULL means invited but not yet claimed: the row is real and assignable, but
+  -- nobody can sign in as it.
+  password_hash TEXT,
+  role          TEXT NOT NULL DEFAULT 'member',
+  status        TEXT NOT NULL DEFAULT 'active',
+  created_at    TEXT NOT NULL,
+  last_login_at TEXT
+);
+-- Expression index, so "one account per address" holds regardless of typed case.
+CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users(lower(email));
+
+CREATE TABLE IF NOT EXISTS sessions (
+  -- The SHA-256 of the cookie token, never the token: a leaked database, or a leaked
+  -- backup, must not hand over live sessions.
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at   TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  expires_at   TEXT NOT NULL,
+  user_agent   TEXT
+);
+CREATE INDEX IF NOT EXISTS sessions_by_user ON sessions(user_id, expires_at);
 `;
 
 /**
@@ -61,6 +92,16 @@ CREATE TABLE IF NOT EXISTS settings (
  * section to SECTION_KEYS also upgrades a database that predates it. Existing rows
  * keep their data and get an empty string for the new section.
  */
+/**
+ * Columns added after their table already existed. Additive only — never a rename or a
+ * drop — so a `version-1` checkout keeps working against a migrated database.
+ */
+const EXTRA_COLUMNS: { table: string; column: string; ddl: string }[] = [
+  // Links a per-project roster row to an account. Nullable: a roster row without an
+  // account still renders in the standup and still owns its history.
+  { table: "people", column: "user_id", ddl: "TEXT REFERENCES users(id) ON DELETE SET NULL" },
+];
+
 function addMissingColumns(db: DatabaseSync): void {
   const columnsOf = (table: string) =>
     new Set(
@@ -81,6 +122,14 @@ function addMissingColumns(db: DatabaseSync): void {
       db.exec(
         `ALTER TABLE projects ADD COLUMN ${column} TEXT NOT NULL DEFAULT '${DEFAULT_LABELS[key]}'`,
       );
+    }
+  }
+
+  for (const { table, column, ddl } of EXTRA_COLUMNS) {
+    // SQLite allows ADD COLUMN with a REFERENCES clause only when it defaults to NULL,
+    // which every entry here does.
+    if (!columnsOf(table).has(column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
     }
   }
 }
@@ -636,4 +685,183 @@ export function setSetting(key: string, value: string, db: DatabaseSync = open()
   db.prepare(
     "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
   ).run(key, value);
+}
+
+/* ------------------------------------------------------------------ *
+ * Accounts and sessions
+ * ------------------------------------------------------------------ */
+
+function toUser(r: Row): User {
+  return {
+    id: String(r.id),
+    email: String(r.email),
+    name: String(r.name),
+    role: (String(r.role) === "admin" ? "admin" : "member") as Role,
+    status: String(r.status) as UserStatus,
+    hasPassword: r.password_hash != null && String(r.password_hash).length > 0,
+    createdAt: String(r.created_at),
+    lastLoginAt: r.last_login_at == null ? null : String(r.last_login_at),
+  };
+}
+
+/** Zero means the app has never been set up, which is what puts it in setup mode. */
+export function countUsers(): number {
+  return (open().prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
+}
+
+export function listUsers(): User[] {
+  return (
+    open().prepare("SELECT * FROM users ORDER BY name COLLATE NOCASE").all() as unknown as Row[]
+  ).map(toUser);
+}
+
+export function getUser(id: string): User | null {
+  const row = open().prepare("SELECT * FROM users WHERE id = ?").get(id) as unknown as
+    | Row
+    | undefined;
+  return row ? toUser(row) : null;
+}
+
+/** Returns the stored hash alongside the user — only the sign-in path should call this. */
+export function findUserForSignIn(
+  email: string,
+): { user: User; passwordHash: string | null } | null {
+  const row = open()
+    .prepare("SELECT * FROM users WHERE lower(email) = lower(?)")
+    .get(email) as unknown as Row | undefined;
+  if (!row) return null;
+  return {
+    user: toUser(row),
+    passwordHash: row.password_hash == null ? null : String(row.password_hash),
+  };
+}
+
+export interface NewUser {
+  email: string;
+  name: string;
+  passwordHash: string | null;
+  role: Role;
+  status: UserStatus;
+}
+
+export function createUser(input: NewUser): User {
+  const id = newId("usr");
+  withWrite((tx) => {
+    tx.prepare(
+      `INSERT INTO users (id, email, name, password_hash, role, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      input.email,
+      input.name,
+      input.passwordHash,
+      input.role,
+      input.status,
+      new Date().toISOString(),
+    );
+  });
+  return getUser(id)!;
+}
+
+/**
+ * Create the first account, refusing if one already exists.
+ *
+ * The count is re-checked *inside* the transaction on purpose: two people opening the
+ * setup page at the same moment must not both become admin.
+ */
+export function createFirstAdmin(input: Omit<NewUser, "role" | "status">): User | "already-setup" {
+  const id = newId("usr");
+  const result = withWrite((tx) => {
+    const { n } = tx.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number };
+    if (n > 0) return "already-setup" as const;
+    tx.prepare(
+      `INSERT INTO users (id, email, name, password_hash, role, status, created_at)
+       VALUES (?, ?, ?, ?, 'admin', 'active', ?)`,
+    ).run(id, input.email, input.name, input.passwordHash, new Date().toISOString());
+    return "created" as const;
+  });
+  return result === "already-setup" ? result : getUser(id)!;
+}
+
+export function setUserPassword(userId: string, passwordHash: string): void {
+  withWrite((tx) => {
+    tx.prepare("UPDATE users SET password_hash = ?, status = 'active' WHERE id = ?").run(
+      passwordHash,
+      userId,
+    );
+    // A password change invalidates every other session for that account.
+    tx.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+  });
+}
+
+export function recordLogin(userId: string): void {
+  withWrite((tx) =>
+    tx.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(
+      new Date().toISOString(),
+      userId,
+    ),
+  );
+}
+
+export function createSession(input: {
+  id: string;
+  userId: string;
+  expiresAt: string;
+  userAgent: string | null;
+}): void {
+  const now = new Date().toISOString();
+  withWrite((tx) => {
+    // Opportunistic sweep: no cron, and login is the natural moment for it.
+    tx.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(now);
+    tx.prepare(
+      `INSERT INTO sessions (id, user_id, created_at, last_seen_at, expires_at, user_agent)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(input.id, input.userId, now, now, input.expiresAt, input.userAgent);
+  });
+}
+
+/** Looks up a live session and its user. Expired rows are treated as absent. */
+export function findSession(id: string): { session: Session; user: User } | null {
+  const row = open()
+    .prepare(
+      `SELECT s.id, s.user_id, s.created_at, s.last_seen_at, s.expires_at, u.*
+         FROM sessions s JOIN users u ON u.id = s.user_id
+        WHERE s.id = ? AND s.expires_at > ?`,
+    )
+    .get(id, new Date().toISOString()) as unknown as Row | undefined;
+  if (!row) return null;
+  return {
+    session: {
+      id: String(row.id),
+      userId: String(row.user_id),
+      createdAt: String(row.created_at),
+      lastSeenAt: String(row.last_seen_at),
+      expiresAt: String(row.expires_at),
+    },
+    user: toUser(row),
+  };
+}
+
+/** Slides the expiry and records activity. Both writes are throttled by the caller. */
+export function refreshSession(id: string, expiresAt: string | null): void {
+  const now = new Date().toISOString();
+  withWrite((tx) => {
+    if (expiresAt) {
+      tx.prepare("UPDATE sessions SET expires_at = ?, last_seen_at = ? WHERE id = ?").run(
+        expiresAt,
+        now,
+        id,
+      );
+    } else {
+      tx.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run(now, id);
+    }
+  });
+}
+
+export function deleteSession(id: string): void {
+  withWrite((tx) => tx.prepare("DELETE FROM sessions WHERE id = ?").run(id));
+}
+
+export function deleteUserSessions(userId: string): void {
+  withWrite((tx) => tx.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId));
 }

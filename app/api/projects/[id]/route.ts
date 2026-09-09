@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { badRequest, json, notFound, readJsonBody, trimmedString } from "@/lib/api";
+import { badRequest, json, notFound, readJsonBody, requireApiUser, trimmedString } from "@/lib/api";
 import { deleteProject, updateProject, type ProjectPatch } from "@/lib/db";
 import { DEFAULT_LABELS, SECTION_KEYS, type SectionKey } from "@/lib/types";
 
@@ -13,6 +13,9 @@ interface Body {
 }
 
 export async function PATCH(request: NextRequest, ctx: RouteContext<"/api/projects/[id]">) {
+  const auth = await requireApiUser(request);
+  if (auth instanceof Response) return auth;
+
   const { id } = await ctx.params;
   const body = await readJsonBody<Body>(request);
   if (!body) return badRequest("Expected a JSON body.");
@@ -60,7 +63,10 @@ export async function PATCH(request: NextRequest, ctx: RouteContext<"/api/projec
   return json({ project });
 }
 
-export async function DELETE(_request: NextRequest, ctx: RouteContext<"/api/projects/[id]">) {
+export async function DELETE(request: NextRequest, ctx: RouteContext<"/api/projects/[id]">) {
+  const auth = await requireApiUser(request);
+  if (auth instanceof Response) return auth;
+
   const { id } = await ctx.params;
   if (!deleteProject(id)) return notFound("No such project.");
   return json({ ok: true });

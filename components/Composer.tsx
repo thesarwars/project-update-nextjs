@@ -47,6 +47,12 @@ interface PendingSave extends EntryText {
   personId: string;
 }
 
+export interface CurrentUser {
+  id: string;
+  name: string;
+  role: string;
+}
+
 interface Prefs {
   options: RenderOptions;
   flavor: CopyFlavor;
@@ -78,7 +84,7 @@ function loadPrefs(): Prefs {
   }
 }
 
-export default function Composer() {
+export default function Composer({ currentUser }: { currentUser: CurrentUser }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [date, setDate] = useState<string>(initialDate);
@@ -412,6 +418,7 @@ export default function Composer() {
         onManagePeople={() => setPeopleOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
         saveState={saveState}
+        currentUser={currentUser}
       />
 
       {/* Two independent scroll panes on a wide screen; one ordinary page below that. */}

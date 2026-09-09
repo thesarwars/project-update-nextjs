@@ -7,6 +7,7 @@ import {
   LuChevronLeft,
   LuChevronRight,
   LuPlus,
+  LuLogOut,
   LuSettings,
   LuUsers,
 } from "react-icons/lu";
@@ -31,6 +32,7 @@ interface Props {
   onManagePeople: () => void;
   onOpenSettings: () => void;
   saveState: SaveState;
+  currentUser: { id: string; name: string; role: string };
 }
 
 export default function TopBar({
@@ -50,6 +52,7 @@ export default function TopBar({
   onManagePeople,
   onOpenSettings,
   saveState,
+  currentUser,
 }: Props) {
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-background/85 backdrop-blur">
@@ -140,8 +143,41 @@ export default function TopBar({
           <IconButton label="Project settings" size="sm" onClick={onOpenSettings}>
             <LuSettings className="h-4 w-4" />
           </IconButton>
+          <span className="mx-1 h-5 w-px bg-line" aria-hidden />
+          <span className="flex items-center gap-1.5" title={currentUser.name}>
+            <Avatar name={currentUser.name} />
+            <span className="hidden max-w-[110px] truncate text-[12.5px] font-medium sm:inline">
+              {currentUser.name}
+            </span>
+          </span>
+          <form action="/api/auth/logout" method="post">
+            <IconButton label="Sign out" type="submit" variant="ghost" size="sm">
+              <LuLogOut className="h-4 w-4" />
+            </IconButton>
+          </form>
         </div>
       </div>
     </header>
+  );
+}
+
+/** Initials on a hue derived from the name, so people stay visually distinct. */
+function Avatar({ name }: { name: string }) {
+  const initials = name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]!.toUpperCase())
+    .join("");
+  let hash = 0;
+  for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) % 360;
+  return (
+    <span
+      aria-hidden
+      className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold text-white"
+      style={{ background: `hsl(${hash} 52% 42%)` }}
+    >
+      {initials || "?"}
+    </span>
   );
 }

@@ -45,3 +45,39 @@ export const emptyEntry = (): Entry => ({
 
 export const isBlankEntry = (entry: Entry | undefined): boolean =>
   !entry || SECTION_KEYS.every((key) => !entry[key].trim());
+
+/* ------------------------------------------------------------------ *
+ * Accounts
+ * ------------------------------------------------------------------ */
+
+export const ROLES = ["admin", "member"] as const;
+export type Role = (typeof ROLES)[number];
+
+/**
+ * Deliberately two roles, not three. In a team this size a "viewer" is a manager with
+ * nothing assigned — a third global role taxes every permission check and is wrong the
+ * first time they want to comment. Read-only, if it is ever needed, belongs on the
+ * per-project membership rather than on the account.
+ */
+export const USER_STATUSES = ["active", "invited", "disabled"] as const;
+export type UserStatus = (typeof USER_STATUSES)[number];
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  role: Role;
+  status: UserStatus;
+  /** False until the account has a password — an invited user cannot sign in yet. */
+  hasPassword: boolean;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+export interface Session {
+  id: string;
+  userId: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+}
