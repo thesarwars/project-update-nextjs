@@ -85,8 +85,168 @@ function addMissingColumns(db: DatabaseSync): void {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Write transactions
+ * ------------------------------------------------------------------ */
+
+/** SQLITE_BUSY / SQLITE_LOCKED. `errcode` is numeric and stable; the message is not. */
+function isBusy(err: unknown): boolean {
+  const code = (err as { errcode?: number })?.errcode;
+  return code === 5 || code === 6;
+}
+
+const BUSY_RETRIES = 4;
+const sleeper = new Int32Array(new SharedArrayBuffer(4));
+
+/** Synchronous sleep. There is no await available inside a transaction, by design. */
+function backoff(attempt: number): void {
+  Atomics.wait(sleeper, 0, 0, 10 * 2 ** attempt + Math.floor(Math.random() * 10));
+}
+
+/** Raised when a write could not get the lock. Routes should answer 503, not 500. */
+export class DatabaseBusyError extends Error {
+  constructor(cause?: unknown) {
+    super("The database is busy. Try again.");
+    this.name = "DatabaseBusyError";
+    this.cause = cause;
+  }
+}
+
+let txDepth = 0;
+
+/**
+ * Run a write transaction.
+ *
+ * `fn` is SYNCHRONOUS on purpose. `node:sqlite` blocks the event loop, so an `await`
+ * between BEGIN and COMMIT would let another request interleave its statements on this
+ * same connection. A synchronous callback makes that mistake a compile error rather
+ * than an intermittent one.
+ *
+ * BEGIN IMMEDIATE, not BEGIN. A deferred transaction takes a read lock and upgrades on
+ * first write; if anything wrote in between, SQLite returns SQLITE_BUSY *immediately*
+ * and never consults busy_timeout. IMMEDIATE takes the write lock up front, so the
+ * timeout applies and the retry below is a backstop rather than the only defence.
+ *
+ * Nested calls use SAVEPOINT, since SQLite has no nested BEGIN.
+ */
+export function withWrite<T>(fn: (db: DatabaseSync) => T): T {
+  const db = open();
+
+  if (txDepth > 0) {
+    const name = `sp_${txDepth}`;
+    db.exec(`SAVEPOINT ${name}`);
+    txDepth += 1;
+    try {
+      const result = fn(db);
+      db.exec(`RELEASE ${name}`);
+      return result;
+    } catch (err) {
+      db.exec(`ROLLBACK TO ${name}`);
+      db.exec(`RELEASE ${name}`);
+      throw err;
+    } finally {
+      txDepth -= 1;
+    }
+  }
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      db.exec("BEGIN IMMEDIATE");
+    } catch (err) {
+      if (isBusy(err) && attempt < BUSY_RETRIES) {
+        backoff(attempt);
+        continue;
+      }
+      throw isBusy(err) ? new DatabaseBusyError(err) : err;
+    }
+
+    txDepth = 1;
+    try {
+      const result = fn(db);
+      db.exec("COMMIT");
+      return result;
+    } catch (err) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* SQLite already rolled the transaction back */
+      }
+      if (isBusy(err) && attempt < BUSY_RETRIES) {
+        backoff(attempt);
+        continue;
+      }
+      throw isBusy(err) ? new DatabaseBusyError(err) : err;
+    } finally {
+      txDepth = 0;
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Schema versioning
+ * ------------------------------------------------------------------ */
+
+interface Migration {
+  version: number;
+  name: string;
+  up: (db: DatabaseSync) => void;
+}
+
+/**
+ * Ordered, run-once schema steps.
+ *
+ * `addMissingColumns()` stays the mechanism for adding columns — it is idempotent by
+ * construction and needs no bookkeeping. This ladder exists for the things it cannot
+ * express: backfills, renames, table rebuilds. Each `up` should still be written
+ * defensively, because a fresh database gets the full SCHEMA first and then runs the
+ * ladder over it.
+ *
+ * Version lives in `PRAGMA user_version` rather than a settings row: it is atomic with
+ * the transaction that performs the step, and the app's own settings UI cannot clobber it.
+ */
+const MIGRATIONS: Migration[] = [];
+
+function runMigrations(db: DatabaseSync): void {
+  const row = db.prepare("PRAGMA user_version").get() as Record<string, number>;
+  const current = Number(Object.values(row)[0] ?? 0);
+
+  const pending = MIGRATIONS.filter((m) => m.version > current).sort(
+    (a, b) => a.version - b.version,
+  );
+
+  for (const migration of pending) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      migration.up(db);
+      // PRAGMA cannot be parameterised. The integer comes from our own array, and
+      // Math.trunc makes that guarantee explicit rather than implied.
+      db.exec(`PRAGMA user_version = ${Math.trunc(migration.version)}`);
+      db.exec("COMMIT");
+    } catch (err) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* already rolled back */
+      }
+      throw new Error(
+        `Migration ${migration.version} (${migration.name}) failed; database left at ` +
+          `user_version ${current}. Restore from data/backups and investigate.`,
+        { cause: err },
+      );
+    }
+  }
+}
+
+/** DELETE locally (one copyable file), WAL when deployed (concurrent readers). */
+const JOURNAL_MODE = (process.env.STANDUP_JOURNAL_MODE ?? "DELETE").toUpperCase() === "WAL"
+  ? "WAL"
+  : "DELETE";
+
 /** Cached on globalThis so a dev-server hot reload reuses the open handle. */
-const globalRef = globalThis as typeof globalThis & { __standupDb?: DatabaseSync };
+const globalRef = globalThis as typeof globalThis & {
+  __standupDb?: DatabaseSync;
+  __standupDbShutdownHooked?: boolean;
+};
 
 /**
  * Module scope, not global scope, and deliberately so: a hot reload re-evaluates this
@@ -108,19 +268,56 @@ function open(): DatabaseSync {
 
   fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
   const db = new DatabaseSync(DB_FILE);
-  // Rollback journal, not WAL: one self-contained file you can copy to back up, with no
-  // -wal/-shm siblings left behind when the dev server is killed. A single writer on a
-  // localhost app gains nothing from WAL.
-  db.exec("PRAGMA journal_mode = DELETE");
-  db.exec("PRAGMA synchronous = FULL");
+
+  // DELETE keeps the database one self-contained file you can copy to back up, which is
+  // right for a single process. WAL lets many readers run alongside a writer, which is
+  // right once this is deployed for a team. Neither is universally correct, so it is a
+  // deployment decision rather than a hardcoded one. `VACUUM INTO` (scripts/backup.mjs)
+  // produces a single consistent file either way, so the one-file property survives WAL.
+  db.exec(`PRAGMA journal_mode = ${JOURNAL_MODE}`);
+  db.exec(`PRAGMA synchronous = ${JOURNAL_MODE === "WAL" ? "NORMAL" : "FULL"}`);
   db.exec("PRAGMA foreign_keys = ON");
-  db.exec("PRAGMA busy_timeout = 4000");
+  db.exec("PRAGMA busy_timeout = 5000");
+  if (JOURNAL_MODE === "WAL") db.exec("PRAGMA journal_size_limit = 6291456");
+
   db.exec(SCHEMA);
   addMissingColumns(db);
   columnsChecked = true;
   globalRef.__standupDb = db;
+  runMigrations(db);
   seedIfEmpty(db);
+  registerShutdown(db);
   return db;
+}
+
+/**
+ * Close the handle on the way out so WAL is checkpointed and its -wal/-shm siblings are
+ * removed, leaving one file behind.
+ *
+ * Signal handlers are registered in production only. In development, taking over SIGINT
+ * would stop Ctrl-C from working the way the dev server expects.
+ */
+function registerShutdown(db: DatabaseSync): void {
+  if (globalRef.__standupDbShutdownHooked) return;
+  globalRef.__standupDbShutdownHooked = true;
+
+  const close = () => {
+    try {
+      db.close();
+    } catch {
+      /* already closed, or mid-statement — nothing useful to do while exiting */
+    }
+  };
+
+  process.once("exit", close);
+  if (process.env.NODE_ENV === "production") {
+    for (const signal of ["SIGTERM", "SIGINT"] as const) {
+      process.once(signal, () => {
+        close();
+        process.exit(0);
+      });
+    }
+  }
 }
 
 /**
@@ -232,16 +429,16 @@ export function projectExists(id: string): boolean {
 }
 
 export function createProject(name: string, peopleNames: string[] = []): Project {
-  const db = open();
   const id = newId("prj");
-  const next = db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM projects").get() as {
-    n: number;
-  };
   const labelColumns = SECTION_KEYS.map(labelColumn);
 
-  db.exec("BEGIN");
-  try {
-    db.prepare(
+  withWrite((tx) => {
+    // Read inside the transaction: outside it, two concurrent creates could both read
+    // the same max and land on the same sort_order.
+    const next = tx
+      .prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM projects")
+      .get() as { n: number };
+    tx.prepare(
       `INSERT INTO projects (id, name, title_template, created_at, sort_order, ${labelColumns.join(", ")})
        VALUES (?, ?, ?, ?, ?, ${labelColumns.map(() => "?").join(", ")})`,
     ).run(
@@ -252,15 +449,11 @@ export function createProject(name: string, peopleNames: string[] = []): Project
       next.n,
       ...SECTION_KEYS.map((key) => DEFAULT_LABELS[key]),
     );
-    const insertPerson = db.prepare(
+    const insertPerson = tx.prepare(
       "INSERT INTO people (id, project_id, name, active, sort_order) VALUES (?, ?, ?, 1, ?)",
     );
     peopleNames.forEach((personName, i) => insertPerson.run(newId("psn"), id, personName, i));
-    db.exec("COMMIT");
-  } catch (err) {
-    db.exec("ROLLBACK");
-    throw err;
-  }
+  });
 
   setSetting("lastProjectId", id);
   return getProject(id)!;
@@ -274,11 +467,9 @@ export interface ProjectPatch {
 }
 
 export function updateProject(id: string, patch: ProjectPatch): Project | null {
-  const db = open();
   if (!projectExists(id)) return null;
 
-  db.exec("BEGIN");
-  try {
+  withWrite((db) => {
     const sets: string[] = [];
     const values: string[] = [];
     if (patch.name !== undefined) {
@@ -326,11 +517,7 @@ export function updateProject(id: string, patch: ProjectPatch): Project | null {
         if (!keep.has(staleId)) db.prepare("DELETE FROM people WHERE id = ?").run(staleId);
       }
     }
-    db.exec("COMMIT");
-  } catch (err) {
-    db.exec("ROLLBACK");
-    throw err;
-  }
+  });
 
   return getProject(id);
 }
