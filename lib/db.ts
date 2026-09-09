@@ -1819,6 +1819,32 @@ export function moveIssue(id: string, move: MoveIssue): Issue | IssueError {
   return outcome ?? getIssue(id)!;
 }
 
+/**
+ * A board drop: land in a column and at a position, as one unit.
+ *
+ * Doing it in two requests would let a card show the new status while still sitting in
+ * the wrong place if the second one failed. `withWrite` nests through SAVEPOINT, so both
+ * inner calls join this transaction rather than opening their own.
+ */
+export function moveIssueOnBoard(
+  id: string,
+  input: { statusId?: string; beforeId?: string | null; afterId?: string | null },
+): Issue | IssueError {
+  return withWrite((): Issue | IssueError => {
+    if (input.statusId) {
+      const updated = updateIssue(id, { statusId: input.statusId });
+      if (typeof updated === "string") return updated;
+    }
+    if (input.beforeId !== undefined || input.afterId !== undefined) {
+      return moveIssue(id, {
+        beforeId: input.beforeId ?? undefined,
+        afterId: input.afterId ?? undefined,
+      });
+    }
+    return getIssue(id)!;
+  });
+}
+
 export function archiveIssue(id: string, archived: boolean): Issue | IssueError {
   const outcome = withWrite((tx): IssueError | null => {
     const { changes } = tx

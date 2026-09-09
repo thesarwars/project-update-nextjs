@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { badRequest, forbidden, json, notFound, readJsonBody, requireApiUser } from "@/lib/api";
-import { getIssue, moveIssue } from "@/lib/db";
+import { getIssue, moveIssue, moveIssueOnBoard } from "@/lib/db";
 import { canAccessProject } from "@/lib/permissions";
 import { refusal } from "../../route";
 
@@ -10,6 +10,8 @@ interface Body {
   parentId?: unknown;
   beforeId?: unknown;
   afterId?: unknown;
+  /** Set by the board, where a drop changes column and position together. */
+  statusId?: unknown;
 }
 
 /**
@@ -31,11 +33,19 @@ export async function POST(request: NextRequest, ctx: RouteContext<"/api/issues/
   const asId = (value: unknown) =>
     typeof value === "string" && value ? value : value === null ? null : undefined;
 
-  const result = moveIssue(id, {
-    parentId: "parentId" in body ? asId(body.parentId) : undefined,
-    beforeId: asId(body.beforeId) ?? undefined,
-    afterId: asId(body.afterId) ?? undefined,
-  });
+  const statusId = typeof body.statusId === "string" ? body.statusId : undefined;
+
+  const result = statusId
+    ? moveIssueOnBoard(id, {
+        statusId,
+        beforeId: asId(body.beforeId),
+        afterId: asId(body.afterId),
+      })
+    : moveIssue(id, {
+        parentId: "parentId" in body ? asId(body.parentId) : undefined,
+        beforeId: asId(body.beforeId) ?? undefined,
+        afterId: asId(body.afterId) ?? undefined,
+      });
 
   if (typeof result === "string") return refusal(result, existing.type);
   return json({ issue: result });
