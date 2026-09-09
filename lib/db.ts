@@ -741,6 +741,13 @@ export function getProject(id: string): Project | null {
   return toProject(row, people);
 }
 
+export function getProjectByKey(key: string): Project | null {
+  const row = open()
+    .prepare("SELECT id FROM projects WHERE key = ? COLLATE NOCASE")
+    .get(key) as { id: string } | undefined;
+  return row ? getProject(row.id) : null;
+}
+
 export function projectExists(id: string): boolean {
   return open().prepare("SELECT 1 FROM projects WHERE id = ?").get(id) !== undefined;
 }
@@ -1570,6 +1577,14 @@ export function getIssue(id: string): Issue | null {
   const db = open();
   const row = db.prepare("SELECT * FROM issues WHERE id = ?").get(id) as unknown as Row | undefined;
   return row ? toIssue(row, projectKeyOf(db, String(row.project_id))) : null;
+}
+
+/** Resolves a display key like `GS-142`, which carries its own project. */
+export function getIssueByKey(key: string): Issue | null {
+  const match = /^([A-Za-z][A-Za-z0-9]*)-(\d+)$/.exec(key.trim());
+  if (!match) return null;
+  const project = getProjectByKey(match[1]);
+  return project ? getIssueByNumber(project.id, Number(match[2])) : null;
 }
 
 export function getIssueByNumber(projectId: string, number: number): Issue | null {

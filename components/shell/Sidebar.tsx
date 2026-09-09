@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { LuCalendarDays, LuSettings, LuUsers } from "react-icons/lu";
+import { LuCalendarDays, LuListTodo, LuSettings, LuUsers } from "react-icons/lu";
 
 interface Props {
   /** Used when the URL carries no ?project= yet. */
@@ -10,6 +10,7 @@ interface Props {
 }
 
 const PERSONAL = [{ href: "/", label: "Standup", icon: LuCalendarDays }];
+const PLAN = [{ href: "/backlog", label: "Backlog", icon: LuListTodo }];
 const TEAM = [
   { href: "/team", label: "People", icon: LuUsers },
   { href: "/settings", label: "Settings", icon: LuSettings },
@@ -28,6 +29,7 @@ export default function Sidebar({ fallbackProjectId }: Props) {
       className="hidden w-[212px] shrink-0 flex-col gap-4 border-r border-line px-3 py-3 lg:flex"
     >
       <Group items={PERSONAL} pathname={pathname} query={query} />
+      <Group title="Plan" items={PLAN} pathname={pathname} query={query} />
       <Group title="Team" items={TEAM} pathname={pathname} query={query} />
     </nav>
   );

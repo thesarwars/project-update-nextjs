@@ -18,6 +18,14 @@
   --success: #0a8354;
   --danger: #c93b3b;
   --shadow-card: 0 1px 2px rgb(16 24 40 / 0.04), 0 1px 3px rgb(16 24 40 / 0.06);
+
+  /* Issue types. Shape carries the meaning; colour only reinforces it, so the
+     distinction survives greyscale and colour-blindness. */
+  --type-epic: #7c3aed;
+  --type-story: #0a8354;
+  --type-task: #2563eb;
+  --type-subtask: #6f9bf0;
+  --type-bug: #c93b3b;
 }
 
 @theme inline {
@@ -32,6 +40,11 @@
   --color-accent-contrast: var(--accent-contrast);
   --color-success: var(--success);
   --color-danger: var(--danger);
+  --color-type-epic: var(--type-epic);
+  --color-type-story: var(--type-story);
+  --color-type-task: var(--type-task);
+  --color-type-subtask: var(--type-subtask);
+  --color-type-bug: var(--type-bug);
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }
