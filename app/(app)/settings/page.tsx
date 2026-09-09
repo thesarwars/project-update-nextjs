@@ -1,17 +1,17 @@
 import ProjectSettingsPanel from "@/components/settings/ProjectSettingsPanel";
 import ViewToolbar from "@/components/shell/ViewToolbar";
 import { requireUser } from "@/lib/auth";
-import { getSetting, listProjects } from "@/lib/db";
+import { getSetting, projectsVisibleTo } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export const metadata = { title: "Settings · Standup" };
 
 export default async function SettingsPage({ searchParams }: PageProps<"/settings">) {
-  await requireUser("/settings");
+  const user = await requireUser("/settings");
   const params = await searchParams;
 
-  const projects = listProjects();
+  const projects = projectsVisibleTo(user);
   const requested = typeof params.project === "string" ? params.project : null;
   const last = getSetting("lastProjectId");
   const project =

@@ -91,6 +91,14 @@ export async function requireApiUser(request: Request): Promise<User | Response>
   return user;
 }
 
+/** As `requireApiUser`, but also refuses anyone who is not an administrator. */
+export async function requireApiAdmin(request: Request): Promise<User | Response> {
+  const auth = await requireApiUser(request);
+  if (auth instanceof Response) return auth;
+  if (auth.role !== "admin") return forbidden("Only an administrator can do that.");
+  return auth;
+}
+
 /**
  * Turns a lost write lock into 503 + Retry-After rather than a 500. The client's
  * debounced save re-queues on failure, so a busy write is invisible to whoever is typing.

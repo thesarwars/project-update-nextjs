@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { badRequest, json, notFound, readJsonBody, requireApiUser, trimmedString } from "@/lib/api";
+import { badRequest, json, notFound, readJsonBody, requireApiAdmin, trimmedString } from "@/lib/api";
 import { deleteProject, updateProject, type ProjectPatch } from "@/lib/db";
 import { DEFAULT_LABELS, SECTION_KEYS, type SectionKey } from "@/lib/types";
 
@@ -13,7 +13,7 @@ interface Body {
 }
 
 export async function PATCH(request: NextRequest, ctx: RouteContext<"/api/projects/[id]">) {
-  const auth = await requireApiUser(request);
+  const auth = await requireApiAdmin(request);
   if (auth instanceof Response) return auth;
 
   const { id } = await ctx.params;
@@ -64,7 +64,7 @@ export async function PATCH(request: NextRequest, ctx: RouteContext<"/api/projec
 }
 
 export async function DELETE(request: NextRequest, ctx: RouteContext<"/api/projects/[id]">) {
-  const auth = await requireApiUser(request);
+  const auth = await requireApiAdmin(request);
   if (auth instanceof Response) return auth;
 
   const { id } = await ctx.params;

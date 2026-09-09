@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_LABELS,
+  type Invite,
   type Role,
   type Session,
   type User,
@@ -85,6 +86,25 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_agent   TEXT
 );
 CREATE INDEX IF NOT EXISTS sessions_by_user ON sessions(user_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS invites (
+  id               TEXT PRIMARY KEY,
+  -- Like sessions, only the hash is stored. The raw token is shown once, to the admin
+  -- who created it, and never again.
+  token_hash       TEXT NOT NULL UNIQUE,
+  email            TEXT NOT NULL,
+  name             TEXT,
+  role             TEXT NOT NULL DEFAULT 'member',
+  -- The roster row being claimed. Because entries are keyed by person_id, claiming this
+  -- hands the new account every standup entry that row has ever written.
+  person_id        TEXT REFERENCES people(id) ON DELETE CASCADE,
+  created_by       TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at       TEXT NOT NULL,
+  expires_at       TEXT NOT NULL,
+  accepted_at      TEXT,
+  accepted_user_id TEXT REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS invites_by_person ON invites(person_id);
 `;
 
 /**
@@ -875,4 +895,207 @@ export function deleteSession(id: string): void {
 
 export function deleteUserSessions(userId: string): void {
   withWrite((tx) => tx.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId));
+}
+
+/* ------------------------------------------------------------------ *
+ * Invitations
+ * ------------------------------------------------------------------ */
+
+function toInvite(r: Row): Invite {
+  return {
+    id: String(r.id),
+    email: String(r.email),
+    name: r.name == null ? null : String(r.name),
+    role: (String(r.role) === "admin" ? "admin" : "member") as Role,
+    personId: r.person_id == null ? null : String(r.person_id),
+    createdAt: String(r.created_at),
+    expiresAt: String(r.expires_at),
+    acceptedAt: r.accepted_at == null ? null : String(r.accepted_at),
+  };
+}
+
+export function createInvite(input: {
+  tokenHash: string;
+  email: string;
+  name: string | null;
+  role: Role;
+  personId: string | null;
+  createdBy: string;
+  expiresAt: string;
+}): Invite {
+  const id = newId("inv");
+  withWrite((tx) => {
+    // One live invite per roster row: re-inviting replaces the previous link rather
+    // than leaving two valid URLs in two different chats.
+    if (input.personId) {
+      tx.prepare("DELETE FROM invites WHERE person_id = ? AND accepted_at IS NULL").run(
+        input.personId,
+      );
+    }
+    tx.prepare(
+      `INSERT INTO invites (id, token_hash, email, name, role, person_id, created_by, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      input.tokenHash,
+      input.email,
+      input.name,
+      input.role,
+      input.personId,
+      input.createdBy,
+      new Date().toISOString(),
+      input.expiresAt,
+    );
+  });
+  return getInvite(id)!;
+}
+
+export function getInvite(id: string): Invite | null {
+  const row = open().prepare("SELECT * FROM invites WHERE id = ?").get(id) as unknown as
+    | Row
+    | undefined;
+  return row ? toInvite(row) : null;
+}
+
+/** A live, unaccepted, unexpired invite plus the roster row and project it belongs to. */
+export function findLiveInvite(
+  tokenHash: string,
+): { invite: Invite; personName: string | null; projectName: string | null } | null {
+  const row = open()
+    .prepare(
+      `SELECT i.*, p.name AS person_name, pr.name AS project_name
+         FROM invites i
+         LEFT JOIN people p ON p.id = i.person_id
+         LEFT JOIN projects pr ON pr.id = p.project_id
+        WHERE i.token_hash = ? AND i.accepted_at IS NULL AND i.expires_at > ?`,
+    )
+    .get(tokenHash, new Date().toISOString()) as unknown as Row | undefined;
+  if (!row) return null;
+  return {
+    invite: toInvite(row),
+    personName: row.person_name == null ? null : String(row.person_name),
+    projectName: row.project_name == null ? null : String(row.project_name),
+  };
+}
+
+export function listInvitesForProject(projectId: string): Invite[] {
+  return (
+    open()
+      .prepare(
+        `SELECT i.* FROM invites i
+           JOIN people p ON p.id = i.person_id
+          WHERE p.project_id = ? AND i.accepted_at IS NULL AND i.expires_at > ?`,
+      )
+      .all(projectId, new Date().toISOString()) as unknown as Row[]
+  ).map(toInvite);
+}
+
+export function revokeInvite(id: string): void {
+  withWrite((tx) => tx.prepare("DELETE FROM invites WHERE id = ? AND accepted_at IS NULL").run(id));
+}
+
+export type AcceptResult =
+  | { ok: true; userId: string }
+  | { ok: false; reason: "gone" | "seat-taken" | "email-taken" };
+
+/**
+ * Turn an invite into an account, in one transaction.
+ *
+ * Everything is re-checked inside the transaction: the invite is re-read by hash, the
+ * roster row is only claimed if it is still unclaimed, and the email is only inserted
+ * if it is still free. That is what makes a double-submit — or two people opening the
+ * same link — safe rather than a race.
+ */
+export function acceptInvite(input: {
+  tokenHash: string;
+  name: string;
+  passwordHash: string;
+}): AcceptResult {
+  return withWrite((tx): AcceptResult => {
+    const row = tx
+      .prepare(
+        "SELECT * FROM invites WHERE token_hash = ? AND accepted_at IS NULL AND expires_at > ?",
+      )
+      .get(input.tokenHash, new Date().toISOString()) as unknown as Row | undefined;
+    if (!row) return { ok: false, reason: "gone" };
+
+    const invite = toInvite(row);
+
+    // An existing account for this address joins the roster row instead of a duplicate
+    // being created — that is how one person ends up on two projects.
+    const existing = tx
+      .prepare("SELECT id FROM users WHERE lower(email) = lower(?)")
+      .get(invite.email) as { id: string } | undefined;
+
+    let userId: string;
+    if (existing) {
+      userId = existing.id;
+    } else {
+      userId = newId("usr");
+      tx.prepare(
+        `INSERT INTO users (id, email, name, password_hash, role, status, created_at)
+         VALUES (?, ?, ?, ?, ?, 'active', ?)`,
+      ).run(
+        userId,
+        invite.email,
+        input.name,
+        input.passwordHash,
+        invite.role,
+        new Date().toISOString(),
+      );
+    }
+
+    if (invite.personId) {
+      const seat = tx.prepare("SELECT user_id FROM people WHERE id = ?").get(invite.personId) as
+        | { user_id: string | null }
+        | undefined;
+      if (!seat) return { ok: false, reason: "gone" };
+      if (seat.user_id && seat.user_id !== userId) return { ok: false, reason: "seat-taken" };
+      tx.prepare("UPDATE people SET user_id = ?, active = 1 WHERE id = ?").run(
+        userId,
+        invite.personId,
+      );
+    }
+
+    tx.prepare(
+      "UPDATE invites SET accepted_at = ?, accepted_user_id = ? WHERE id = ?",
+    ).run(new Date().toISOString(), userId, invite.id);
+
+    return { ok: true, userId };
+  });
+}
+
+/** The account attached to each roster row, for the People screen. */
+export function accountsForProject(projectId: string): Record<string, User> {
+  const rows = open()
+    .prepare(
+      `SELECT p.id AS person_id, u.* FROM people p
+         JOIN users u ON u.id = p.user_id
+        WHERE p.project_id = ?`,
+    )
+    .all(projectId) as unknown as Row[];
+  const out: Record<string, User> = {};
+  for (const row of rows) out[String(row.person_id)] = toUser(row);
+  return out;
+}
+
+export function isProjectMember(userId: string, projectId: string): boolean {
+  return (
+    open()
+      .prepare("SELECT 1 FROM people WHERE user_id = ? AND project_id = ? LIMIT 1")
+      .get(userId, projectId) !== undefined
+  );
+}
+
+/** Projects this person can see: everything for an admin, their rosters otherwise. */
+export function projectsVisibleTo(user: User): Project[] {
+  if (user.role === "admin") return listProjects();
+  const ids = new Set(
+    (
+      open()
+        .prepare("SELECT DISTINCT project_id FROM people WHERE user_id = ?")
+        .all(user.id) as unknown as { project_id: string }[]
+    ).map((r) => r.project_id),
+  );
+  return listProjects().filter((p) => ids.has(p.id));
 }

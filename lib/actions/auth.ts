@@ -3,7 +3,8 @@
 import { redirect } from "next/navigation";
 import { signIn, startSession } from "@/lib/auth";
 import { checkPasswordStrength, hashPassword } from "@/lib/password";
-import { countUsers, createFirstAdmin } from "@/lib/db";
+import { hash as sha } from "node:crypto";
+import { acceptInvite, countUsers, createFirstAdmin } from "@/lib/db";
 
 export interface FormState {
   error: string | null;
@@ -53,5 +54,35 @@ export async function setupAction(_prev: FormState, formData: FormData): Promise
   }
 
   await startSession(created.id);
+  redirect("/");
+}
+
+export async function acceptInviteAction(
+  _prev: FormState,
+  formData: FormData,
+): Promise<FormState> {
+  const token = String(formData.get("token") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  const password = String(formData.get("password") ?? "");
+
+  if (!token) return { error: "That invitation link is not valid." };
+  if (!name) return { error: "Enter your name." };
+  const weak = checkPasswordStrength(password);
+  if (weak) return { error: weak };
+
+  const result = acceptInvite({
+    tokenHash: sha("sha256", token, "hex"),
+    name,
+    passwordHash: await hashPassword(password),
+  });
+
+  if (!result.ok) {
+    if (result.reason === "seat-taken") {
+      return { error: "Someone has already claimed that place. Ask for a new invitation." };
+    }
+    return { error: "That invitation has expired or already been used." };
+  }
+
+  await startSession(result.userId);
   redirect("/");
 }

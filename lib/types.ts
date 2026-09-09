@@ -81,3 +81,14 @@ export interface Session {
   lastSeenAt: string;
   expiresAt: string;
 }
+
+export interface Invite {
+  id: string;
+  email: string;
+  name: string | null;
+  role: Role;
+  personId: string | null;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+}

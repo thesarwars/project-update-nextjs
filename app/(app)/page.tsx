@@ -2,19 +2,19 @@ import Link from "next/link";
 import Composer from "@/components/Composer";
 import { EmptyState } from "@/components/ui";
 import { requireUser } from "@/lib/auth";
-import { getSetting, listProjects } from "@/lib/db";
+import { getSetting, projectsVisibleTo } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export const metadata = { title: "Standup" };
 
 export default async function StandupPage({ searchParams }: PageProps<"/">) {
-  await requireUser("/");
+  const user = await requireUser("/");
   const params = await searchParams;
 
   // The project comes from the URL so it survives a refresh and can be shared; the
   // remembered one is only the fallback.
-  const projects = listProjects();
+  const projects = projectsVisibleTo(user);
   const requested = typeof params.project === "string" ? params.project : null;
   const last = getSetting("lastProjectId");
   const projectId =

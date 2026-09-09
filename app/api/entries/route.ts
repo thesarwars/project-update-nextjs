@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
-import { badRequest, json, notFound, readJsonBody, requireApiUser } from "@/lib/api";
+import { badRequest, forbidden, json, notFound, readJsonBody, requireApiUser } from "@/lib/api";
+import { canAccessProject, canEditEntries } from "@/lib/permissions";
 import { isValidISODate } from "@/lib/date";
 import {
   datesWithContent,
@@ -23,6 +24,7 @@ export async function GET(request: NextRequest) {
   if (!projectId) return badRequest("projectId is required.");
   if (!isValidISODate(date)) return badRequest("date must be YYYY-MM-DD.");
   if (!projectExists(projectId)) return notFound("No such project.");
+  if (!canAccessProject(auth, projectId)) return forbidden("You are not on that project.");
 
   return json({
     date,
@@ -54,6 +56,7 @@ export async function PUT(request: NextRequest) {
   }
 
   if (!projectExists(projectId)) return notFound("No such project.");
+  if (!canEditEntries(auth, projectId)) return forbidden("You are not on that project.");
   if (!personBelongsToProject(projectId, personId))
     return notFound("No such person in this project.");
 

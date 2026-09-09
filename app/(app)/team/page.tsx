@@ -2,17 +2,18 @@ import PeopleEditor from "@/components/team/PeopleEditor";
 import ViewToolbar from "@/components/shell/ViewToolbar";
 import { EmptyState } from "@/components/ui";
 import { requireUser } from "@/lib/auth";
-import { getSetting, listProjects } from "@/lib/db";
+import { accountsForProject, getSetting, listInvitesForProject, projectsVisibleTo } from "@/lib/db";
+import { canManageProject } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
 export const metadata = { title: "People · Standup" };
 
 export default async function TeamPage({ searchParams }: PageProps<"/team">) {
-  await requireUser("/team");
+  const user = await requireUser("/team");
   const params = await searchParams;
 
-  const projects = listProjects();
+  const projects = projectsVisibleTo(user);
   const requested = typeof params.project === "string" ? params.project : null;
   const last = getSetting("lastProjectId");
   const project =
@@ -27,7 +28,13 @@ export default async function TeamPage({ searchParams }: PageProps<"/team">) {
       </ViewToolbar>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 thin-scroll">
         {project ? (
-          <PeopleEditor key={project.id} project={project} />
+          <PeopleEditor
+            key={project.id}
+            project={project}
+            accounts={accountsForProject(project.id)}
+            invites={canManageProject(user) ? listInvitesForProject(project.id) : []}
+            canManage={canManageProject(user)}
+          />
         ) : (
           <EmptyState title="No projects yet" body="Create a project first, in Settings." />
         )}
