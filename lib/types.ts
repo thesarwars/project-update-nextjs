@@ -92,3 +92,121 @@ export interface Invite {
   expiresAt: string;
   acceptedAt: string | null;
 }
+
+/* ------------------------------------------------------------------ *
+ * Issues
+ * ------------------------------------------------------------------ */
+
+export const ISSUE_TYPES = ["epic", "story", "task", "bug", "subtask"] as const;
+export type IssueType = (typeof ISSUE_TYPES)[number];
+
+/**
+ * Which types may be a given type's parent.
+ *
+ * `bug` shares a level with `task` and has the same parents — anywhere a task is legal, a
+ * bug is. They differ only in children: a bug may parent tasks, bugs and subtasks, while
+ * a task parents only subtasks, because a task under a task *is* a subtask.
+ *
+ * `bug -> bug` makes this graph cyclic, which is exactly why the hierarchy cannot be
+ * encoded in table structure and lives in data instead.
+ */
+export const PARENT_RULES: Record<IssueType, readonly IssueType[]> = {
+  epic: [],
+  story: ["epic"],
+  task: ["story", "epic", "bug"],
+  bug: ["story", "epic", "bug"],
+  subtask: ["task", "bug"],
+};
+
+/** Types that may sit at the top of the tree with no parent. */
+export const ROOT_TYPES: readonly IssueType[] = ["epic", "story", "task", "bug"];
+
+/**
+ * `bug -> bug` is unbounded from the rules alone, so nesting is capped explicitly.
+ * This is the deepest allowed *depth value*, and a root is depth 0 — so seven levels,
+ * which is already past anything a team this size should be building.
+ */
+export const MAX_DEPTH = 6;
+
+export const ISSUE_TYPE_META: Record<
+  IssueType,
+  { label: string; level: number; sortOrder: number }
+> = {
+  epic: { label: "Epic", level: 1, sortOrder: 0 },
+  story: { label: "Story", level: 2, sortOrder: 1 },
+  task: { label: "Task", level: 3, sortOrder: 2 },
+  bug: { label: "Bug", level: 3, sortOrder: 3 },
+  subtask: { label: "Subtask", level: 4, sortOrder: 4 },
+};
+
+export const STATUS_CATEGORIES = ["todo", "in_progress", "done"] as const;
+export type StatusCategory = (typeof STATUS_CATEGORIES)[number];
+
+/**
+ * `isDone` is the only thing completion arithmetic ever reads — no query compares a
+ * status *name*. That is what lets "Won't do" close an issue, and lets a project rename
+ * "Done" to "Shipped" without touching a line of SQL.
+ */
+export const DEFAULT_STATUSES = [
+  { name: "To do", category: "todo", isDone: false, isDefault: true, color: "#666b74" },
+  { name: "In progress", category: "in_progress", isDone: false, isDefault: false, color: "#2563eb" },
+  { name: "In review", category: "in_progress", isDone: false, isDefault: false, color: "#7c3aed" },
+  { name: "Blocked", category: "in_progress", isDone: false, isDefault: false, color: "#c93b3b" },
+  { name: "Done", category: "done", isDone: true, isDefault: false, color: "#0a8354" },
+  { name: "Won't do", category: "done", isDone: true, isDefault: false, color: "#666b74" },
+] as const satisfies readonly {
+  name: string;
+  category: StatusCategory;
+  isDone: boolean;
+  isDefault: boolean;
+  color: string;
+}[];
+
+export interface Status {
+  id: string;
+  projectId: string;
+  name: string;
+  category: StatusCategory;
+  isDone: boolean;
+  isDefault: boolean;
+  color: string;
+  sortOrder: number;
+}
+
+export const PRIORITIES = [1, 2, 3, 4, 5] as const;
+export const PRIORITY_LABELS: Record<number, string> = {
+  1: "Highest",
+  2: "High",
+  3: "Medium",
+  4: "Low",
+  5: "Lowest",
+};
+
+export interface Issue {
+  id: string;
+  projectId: string;
+  /** Rendered with the project key as `GS-142`; stored as an integer. */
+  number: number;
+  key: string;
+  type: IssueType;
+  parentId: string | null;
+  statusId: string;
+  title: string;
+  description: string;
+  /** A roster row, not an account — so someone who has not signed up is still assignable. */
+  assigneePersonId: string | null;
+  reporterUserId: string | null;
+  priority: number;
+  estimate: number | null;
+  rank: string;
+  /** `/id/id/` of every ancestor. Derived from parentId, never edited directly. */
+  path: string;
+  depth: number;
+  rootId: string;
+  /** Bumped on every edit, so two people saving the same field cannot silently overwrite. */
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+  archivedAt: string | null;
+}

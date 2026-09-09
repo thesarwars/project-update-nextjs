@@ -1,11 +1,22 @@
 import { randomUUID } from "node:crypto";
+import { rankBetween } from "./rank";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_LABELS,
+  DEFAULT_STATUSES,
+  ISSUE_TYPES,
+  ISSUE_TYPE_META,
+  PARENT_RULES,
+  MAX_DEPTH,
+  ROOT_TYPES,
   type Invite,
+  type Issue,
+  type IssueType,
   type Role,
+  type Status,
+  type StatusCategory,
   type Session,
   type User,
   type UserStatus,
@@ -105,6 +116,119 @@ CREATE TABLE IF NOT EXISTS invites (
   accepted_user_id TEXT REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS invites_by_person ON invites(person_id);
+
+-- Reference data, seeded from constants in lib/types.ts. It lives in tables rather than
+-- in code so the rules can be read by a trigger, and changed without a deploy.
+CREATE TABLE IF NOT EXISTS issue_types (
+  key         TEXT PRIMARY KEY,
+  label       TEXT NOT NULL,
+  level       INTEGER NOT NULL,
+  can_be_root INTEGER NOT NULL DEFAULT 1,
+  sort_order  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS issue_parent_rules (
+  parent_type TEXT NOT NULL REFERENCES issue_types(key) ON DELETE CASCADE,
+  child_type  TEXT NOT NULL REFERENCES issue_types(key) ON DELETE CASCADE,
+  PRIMARY KEY (parent_type, child_type)
+);
+
+CREATE TABLE IF NOT EXISTS statuses (
+  id         TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  category   TEXT NOT NULL CHECK (category IN ('todo','in_progress','done')),
+  -- The single source of truth for "is this finished". No query compares a status name.
+  is_done    INTEGER NOT NULL DEFAULT 0 CHECK (is_done IN (0,1)),
+  is_default INTEGER NOT NULL DEFAULT 0,
+  color      TEXT NOT NULL DEFAULT '#666b74',
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS statuses_name ON statuses(project_id, name);
+CREATE UNIQUE INDEX IF NOT EXISTS statuses_default ON statuses(project_id) WHERE is_default = 1;
+
+CREATE TABLE IF NOT EXISTS issues (
+  id           TEXT PRIMARY KEY,
+  project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  number       INTEGER NOT NULL,
+  type         TEXT NOT NULL REFERENCES issue_types(key),
+  -- CASCADE, not RESTRICT: RESTRICT on a self-referencing key makes deleting the whole
+  -- project fail, because parents and children are removed in an unspecified order.
+  -- The UI archives instead of deleting, so this rarely fires.
+  parent_id    TEXT REFERENCES issues(id) ON DELETE CASCADE,
+  status_id    TEXT NOT NULL REFERENCES statuses(id),
+  title        TEXT NOT NULL,
+  description  TEXT NOT NULL DEFAULT '',
+  -- A roster row, so someone who has not signed up yet is still assignable.
+  assignee_person_id TEXT REFERENCES people(id) ON DELETE SET NULL,
+  reporter_user_id   TEXT REFERENCES users(id) ON DELETE SET NULL,
+  priority     INTEGER NOT NULL DEFAULT 3,
+  estimate     REAL,
+  rank         TEXT NOT NULL,
+  -- Derived from parent_id by one UPDATE over a path range. root_id is what turns the
+  -- whole-board epic rollup into a GROUP BY instead of a correlated prefix match.
+  path         TEXT NOT NULL DEFAULT '/',
+  depth        INTEGER NOT NULL DEFAULT 0 CHECK (depth BETWEEN 0 AND 6),
+  root_id      TEXT NOT NULL,
+  version      INTEGER NOT NULL DEFAULT 1,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  resolved_at  TEXT,
+  archived_at  TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS issues_key ON issues(project_id, number);
+CREATE INDEX IF NOT EXISTS issues_parent   ON issues(parent_id);
+CREATE INDEX IF NOT EXISTS issues_root     ON issues(project_id, root_id);
+CREATE INDEX IF NOT EXISTS issues_path     ON issues(project_id, path);
+CREATE INDEX IF NOT EXISTS issues_rank     ON issues(project_id, rank, id);
+CREATE INDEX IF NOT EXISTS issues_status   ON issues(project_id, status_id);
+CREATE INDEX IF NOT EXISTS issues_backlog  ON issues(project_id, archived_at, rank);
+CREATE INDEX IF NOT EXISTS issues_assignee ON issues(assignee_person_id, status_id)
+  WHERE archived_at IS NULL;
+
+-- The database is the backstop for the hierarchy rules. Because the trigger reads the
+-- rule table rather than hard-coding the matrix, changing a rule row changes enforcement.
+CREATE TRIGGER IF NOT EXISTS issues_parent_rule_insert
+BEFORE INSERT ON issues WHEN NEW.parent_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'illegal_parent_type')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM issues p
+      JOIN issue_parent_rules r ON r.parent_type = p.type AND r.child_type = NEW.type
+     WHERE p.id = NEW.parent_id AND p.project_id = NEW.project_id
+  );
+END;
+
+-- The UPDATE OF list includes type deliberately: retyping a story into a subtask under an
+-- epic is the same violation reached through a different door.
+CREATE TRIGGER IF NOT EXISTS issues_parent_rule_update
+BEFORE UPDATE OF parent_id, type ON issues WHEN NEW.parent_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'illegal_parent_type')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM issues p
+      JOIN issue_parent_rules r ON r.parent_type = p.type AND r.child_type = NEW.type
+     WHERE p.id = NEW.parent_id AND p.project_id = NEW.project_id
+  );
+END;
+
+CREATE TRIGGER IF NOT EXISTS issues_root_type_insert
+BEFORE INSERT ON issues WHEN NEW.parent_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'illegal_root_type')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM issue_types t WHERE t.key = NEW.type AND t.can_be_root = 1
+  );
+END;
+
+CREATE TRIGGER IF NOT EXISTS issues_root_type_update
+BEFORE UPDATE OF parent_id, type ON issues WHEN NEW.parent_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'illegal_root_type')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM issue_types t WHERE t.key = NEW.type AND t.can_be_root = 1
+  );
+END;
 `;
 
 /**
@@ -120,6 +244,10 @@ const EXTRA_COLUMNS: { table: string; column: string; ddl: string }[] = [
   // Links a per-project roster row to an account. Nullable: a roster row without an
   // account still renders in the standup and still owns its history.
   { table: "people", column: "user_id", ddl: "TEXT REFERENCES users(id) ON DELETE SET NULL" },
+  // Rendered as the prefix in GS-142. Nullable so the column can be added to an existing
+  // table; the migration fills it in.
+  { table: "projects", column: "key", ddl: "TEXT" },
+  { table: "projects", column: "next_issue_number", ddl: "INTEGER NOT NULL DEFAULT 1" },
 ];
 
 function addMissingColumns(db: DatabaseSync): void {
@@ -273,7 +401,125 @@ interface Migration {
  * Version lives in `PRAGMA user_version` rather than a settings row: it is atomic with
  * the transaction that performs the step, and the app's own settings UI cannot clobber it.
  */
-const MIGRATIONS: Migration[] = [];
+const MIGRATIONS: Migration[] = [
+  {
+    version: 1,
+    name: "seed issue types, rules and per-project tracker defaults",
+    up(db) {
+      seedIssueReferenceData(db);
+      db.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS projects_key ON projects(key) WHERE key IS NOT NULL",
+      );
+      // Per-project defaults are handled by the backfill below rather than here: this
+      // migration runs before the first project exists on a fresh database, and the
+      // backfill has to cover projects created later anyway.
+    },
+  },
+];
+
+/**
+ * Reference data mirrored from the constants in lib/types.ts.
+ *
+ * Written on every open rather than once, because the constants are the source of truth:
+ * editing PARENT_RULES should change what the triggers enforce on the next start, not
+ * leave the database describing a hierarchy the code no longer believes in.
+ */
+function seedIssueReferenceData(db: DatabaseSync): void {
+  const upsertType = db.prepare(
+    `INSERT INTO issue_types (key, label, level, can_be_root, sort_order)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET
+       label = excluded.label, level = excluded.level,
+       can_be_root = excluded.can_be_root, sort_order = excluded.sort_order`,
+  );
+  for (const type of ISSUE_TYPES) {
+    const meta = ISSUE_TYPE_META[type];
+    upsertType.run(type, meta.label, meta.level, ROOT_TYPES.includes(type) ? 1 : 0, meta.sortOrder);
+  }
+
+  db.prepare("DELETE FROM issue_parent_rules").run();
+  const insertRule = db.prepare(
+    "INSERT OR IGNORE INTO issue_parent_rules (parent_type, child_type) VALUES (?, ?)",
+  );
+  for (const child of ISSUE_TYPES) {
+    for (const parent of PARENT_RULES[child]) insertRule.run(parent, child);
+  }
+}
+
+/** `Go Style` -> `GS`, `Go Style Network` -> `GSN`, uniquified against existing keys. */
+function deriveProjectKey(db: DatabaseSync, name: string): string {
+  const words = name.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const initials = words.map((w) => w[0]).join("").toUpperCase();
+  const base = (initials || name.replace(/[^A-Za-z0-9]/g, "").toUpperCase() || "P").slice(0, 4);
+
+  const taken = db.prepare("SELECT 1 FROM projects WHERE key = ?");
+  if (taken.get(base) === undefined) return base;
+  for (let n = 2; n < 100; n += 1) {
+    const candidate = `${base}${n}`;
+    if (taken.get(candidate) === undefined) return candidate;
+  }
+  return `${base}${Math.floor(SPACE_SALT)}`;
+}
+
+/** Cheap deterministic fallback, only reached if 98 keys already collide. */
+const SPACE_SALT = 1000;
+
+/**
+ * Any project missing a key or a status set gets one.
+ *
+ * Runs on open and is idempotent, which covers all three cases at once: the projects that
+ * predate the tracker, the sample project seeded moments earlier, and anything created
+ * while the server was not running.
+ */
+function backfillProjectTrackerDefaults(db: DatabaseSync): void {
+  const pending = db
+    .prepare(
+      `SELECT id, name FROM projects
+        WHERE key IS NULL
+           OR NOT EXISTS (SELECT 1 FROM statuses s WHERE s.project_id = projects.id)`,
+    )
+    .all() as unknown as { id: string; name: string }[];
+  for (const project of pending) ensureProjectTrackerDefaults(db, project.id, project.name);
+}
+
+/** A project needs a key and a status set before it can hold an issue. Idempotent. */
+export function ensureProjectTrackerDefaults(
+  db: DatabaseSync,
+  projectId: string,
+  name: string,
+): void {
+  const row = db.prepare("SELECT key FROM projects WHERE id = ?").get(projectId) as
+    | { key: string | null }
+    | undefined;
+  if (row && !row.key) {
+    db.prepare("UPDATE projects SET key = ? WHERE id = ?").run(
+      deriveProjectKey(db, name),
+      projectId,
+    );
+  }
+
+  const { n } = db
+    .prepare("SELECT COUNT(*) AS n FROM statuses WHERE project_id = ?")
+    .get(projectId) as { n: number };
+  if (n > 0) return;
+
+  const insert = db.prepare(
+    `INSERT INTO statuses (id, project_id, name, category, is_done, is_default, color, sort_order)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  DEFAULT_STATUSES.forEach((status, i) => {
+    insert.run(
+      newId("sts"),
+      projectId,
+      status.name,
+      status.category,
+      status.isDone ? 1 : 0,
+      status.isDefault ? 1 : 0,
+      status.color,
+      i,
+    );
+  });
+}
 
 function runMigrations(db: DatabaseSync): void {
   const row = db.prepare("PRAGMA user_version").get() as Record<string, number>;
@@ -354,7 +600,9 @@ function open(): DatabaseSync {
   columnsChecked = true;
   globalRef.__standupDb = db;
   runMigrations(db);
+  seedIssueReferenceData(db);
   seedIfEmpty(db);
+  backfillProjectTrackerDefaults(db);
   registerShutdown(db);
   return db;
 }
@@ -522,6 +770,7 @@ export function createProject(name: string, peopleNames: string[] = []): Project
       "INSERT INTO people (id, project_id, name, active, sort_order) VALUES (?, ?, ?, 1, ?)",
     );
     peopleNames.forEach((personName, i) => insertPerson.run(newId("psn"), id, personName, i));
+    ensureProjectTrackerDefaults(tx, id, name);
   });
 
   setSetting("lastProjectId", id);
@@ -1098,4 +1347,505 @@ export function projectsVisibleTo(user: User): Project[] {
     ).map((r) => r.project_id),
   );
   return listProjects().filter((p) => ids.has(p.id));
+}
+
+/* ------------------------------------------------------------------ *
+ * Statuses
+ * ------------------------------------------------------------------ */
+
+const toStatus = (r: Row): Status => ({
+  id: String(r.id),
+  projectId: String(r.project_id),
+  name: String(r.name),
+  category: String(r.category) as StatusCategory,
+  isDone: r.is_done === 1,
+  isDefault: r.is_default === 1,
+  color: String(r.color),
+  sortOrder: Number(r.sort_order),
+});
+
+export function listStatuses(projectId: string): Status[] {
+  return (
+    open()
+      .prepare("SELECT * FROM statuses WHERE project_id = ? ORDER BY sort_order, name")
+      .all(projectId) as unknown as Row[]
+  ).map(toStatus);
+}
+
+/* ------------------------------------------------------------------ *
+ * Issues
+ * ------------------------------------------------------------------ */
+
+function toIssue(r: Row, projectKey: string): Issue {
+  return {
+    id: String(r.id),
+    projectId: String(r.project_id),
+    number: Number(r.number),
+    key: `${projectKey}-${Number(r.number)}`,
+    type: String(r.type) as IssueType,
+    parentId: r.parent_id == null ? null : String(r.parent_id),
+    statusId: String(r.status_id),
+    title: String(r.title),
+    description: String(r.description ?? ""),
+    assigneePersonId: r.assignee_person_id == null ? null : String(r.assignee_person_id),
+    reporterUserId: r.reporter_user_id == null ? null : String(r.reporter_user_id),
+    priority: Number(r.priority),
+    estimate: r.estimate == null ? null : Number(r.estimate),
+    rank: String(r.rank),
+    path: String(r.path),
+    depth: Number(r.depth),
+    rootId: String(r.root_id),
+    version: Number(r.version),
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+    resolvedAt: r.resolved_at == null ? null : String(r.resolved_at),
+    archivedAt: r.archived_at == null ? null : String(r.archived_at),
+  };
+}
+
+function projectKeyOf(db: DatabaseSync, projectId: string): string {
+  const row = db.prepare("SELECT key FROM projects WHERE id = ?").get(projectId) as
+    | { key: string | null }
+    | undefined;
+  return row?.key ?? "?";
+}
+
+/** Ancestor ids as `/a/b/`. The mover's own subtree is everything under this plus its id. */
+const prefixOf = (issue: { path: string; id: string }) => `${issue.path}${issue.id}/`;
+
+/** Upper bound for a `path >= x AND path < y` range scan. Never use LIKE — it cannot use the index. */
+function rangeEnd(prefix: string): string {
+  const last = prefix.charCodeAt(prefix.length - 1);
+  return prefix.slice(0, -1) + String.fromCharCode(last + 1);
+}
+
+/**
+ * Arrange rows parent-then-children, siblings by rank.
+ *
+ * Cheap: one pass to bucket by parent, then a stack walk. Doing it here rather than in
+ * SQL is what lets `rank` be a single-row update.
+ */
+export function orderDepthFirst(issues: Issue[]): Issue[] {
+  const byParent = new Map<string | null, Issue[]>();
+  for (const issue of issues) {
+    const siblings = byParent.get(issue.parentId) ?? [];
+    siblings.push(issue);
+    byParent.set(issue.parentId, siblings);
+  }
+  for (const siblings of byParent.values()) {
+    siblings.sort((a, b) => (a.rank < b.rank ? -1 : a.rank > b.rank ? 1 : a.id < b.id ? -1 : 1));
+  }
+
+  const present = new Set(issues.map((i) => i.id));
+  const out: Issue[] = [];
+  const visit = (parentId: string | null) => {
+    for (const issue of byParent.get(parentId) ?? []) {
+      out.push(issue);
+      visit(issue.id);
+    }
+  };
+  visit(null);
+
+  // A filtered list can contain a child whose parent was excluded; keep it rather than
+  // silently dropping it.
+  if (out.length < issues.length) {
+    for (const issue of issues) {
+      if (!out.includes(issue) && (issue.parentId === null || !present.has(issue.parentId))) {
+        out.push(issue);
+        visit(issue.id);
+      }
+    }
+  }
+  return out;
+}
+
+export type IssueError =
+  | "no-project"
+  | "no-parent"
+  | "illegal-parent"
+  | "illegal-root"
+  | "cycle"
+  | "too-deep"
+  | "not-found"
+  | "conflict";
+
+export interface NewIssue {
+  projectId: string;
+  type: IssueType;
+  title: string;
+  description?: string;
+  parentId?: string | null;
+  statusId?: string | null;
+  assigneePersonId?: string | null;
+  reporterUserId?: string | null;
+  priority?: number;
+}
+
+export function createIssue(input: NewIssue): Issue | IssueError {
+  const id = newId("iss");
+
+  const result = withWrite((tx): IssueError | null => {
+    const project = tx.prepare("SELECT id, key FROM projects WHERE id = ?").get(input.projectId);
+    if (!project) return "no-project";
+
+    let parent: Row | undefined;
+    if (input.parentId) {
+      parent = tx
+        .prepare("SELECT * FROM issues WHERE id = ? AND project_id = ?")
+        .get(input.parentId, input.projectId) as unknown as Row | undefined;
+      if (!parent) return "no-parent";
+      if (!PARENT_RULES[input.type].includes(String(parent.type) as IssueType)) {
+        return "illegal-parent";
+      }
+      if (Number(parent.depth) + 1 > MAX_DEPTH) return "too-deep";
+    } else if (!ROOT_TYPES.includes(input.type)) {
+      return "illegal-root";
+    }
+
+    const statusId =
+      input.statusId ??
+      (
+        tx
+          .prepare(
+            "SELECT id FROM statuses WHERE project_id = ? ORDER BY is_default DESC, sort_order LIMIT 1",
+          )
+          .get(input.projectId) as { id: string } | undefined
+      )?.id;
+    if (!statusId) return "no-project";
+
+    // Allocated atomically. MAX(number)+1 would reuse a number after a delete, so a stale
+    // link to GS-42 would silently resolve to a different issue.
+    const { number } = tx
+      .prepare(
+        "UPDATE projects SET next_issue_number = next_issue_number + 1 WHERE id = ? RETURNING next_issue_number - 1 AS number",
+      )
+      .get(input.projectId) as { number: number };
+
+    const last = tx
+      .prepare(
+        `SELECT rank FROM issues
+          WHERE project_id = ? AND ${input.parentId ? "parent_id = ?" : "parent_id IS NULL"}
+          ORDER BY rank DESC LIMIT 1`,
+      )
+      .get(...(input.parentId ? [input.projectId, input.parentId] : [input.projectId])) as
+      | { rank: string }
+      | undefined;
+
+    const path = parent ? prefixOf({ path: String(parent.path), id: String(parent.id) }) : "/";
+    const depth = parent ? Number(parent.depth) + 1 : 0;
+    const rootId = parent ? String(parent.root_id) : id;
+    const now = new Date().toISOString();
+
+    tx.prepare(
+      `INSERT INTO issues (id, project_id, number, type, parent_id, status_id, title, description,
+                           assignee_person_id, reporter_user_id, priority, rank, path, depth, root_id,
+                           created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      input.projectId,
+      number,
+      input.type,
+      input.parentId ?? null,
+      statusId,
+      input.title,
+      input.description ?? "",
+      input.assigneePersonId ?? null,
+      input.reporterUserId ?? null,
+      input.priority ?? 3,
+      rankBetween(last?.rank ?? null, null),
+      path,
+      depth,
+      rootId,
+      now,
+      now,
+    );
+    return null;
+  });
+
+  return result ?? getIssue(id)!;
+}
+
+export function getIssue(id: string): Issue | null {
+  const db = open();
+  const row = db.prepare("SELECT * FROM issues WHERE id = ?").get(id) as unknown as Row | undefined;
+  return row ? toIssue(row, projectKeyOf(db, String(row.project_id))) : null;
+}
+
+export function getIssueByNumber(projectId: string, number: number): Issue | null {
+  const db = open();
+  const row = db
+    .prepare("SELECT * FROM issues WHERE project_id = ? AND number = ?")
+    .get(projectId, number) as unknown as Row | undefined;
+  return row ? toIssue(row, projectKeyOf(db, projectId)) : null;
+}
+
+export interface IssueQuery {
+  includeArchived?: boolean;
+  /** Only this subtree, root included. */
+  under?: string;
+}
+
+/**
+ * Every issue in the project, ordered by path then rank.
+ *
+ * That groups each parent's children together but is NOT depth-first: paths are built
+ * from ids, so every row at one depth sorts before any row a level below it. True
+ * depth-first order would need paths built from rank keys, which would turn every
+ * reorder into a subtree rewrite — far too expensive for the commonest gesture there is.
+ * Use `orderDepthFirst` on the result when display order matters.
+ */
+export function listIssues(projectId: string, query: IssueQuery = {}): Issue[] {
+  const db = open();
+  const key = projectKeyOf(db, projectId);
+  const where: string[] = ["project_id = ?"];
+  const args: (string | number)[] = [projectId];
+
+  if (!query.includeArchived) where.push("archived_at IS NULL");
+  if (query.under) {
+    const root = db.prepare("SELECT id, path FROM issues WHERE id = ?").get(query.under) as
+      | { id: string; path: string }
+      | undefined;
+    if (!root) return [];
+    const prefix = prefixOf(root);
+    where.push("(id = ? OR (path >= ? AND path < ?))");
+    args.push(root.id, prefix, rangeEnd(prefix));
+  }
+
+  return (
+    db
+      .prepare(`SELECT * FROM issues WHERE ${where.join(" AND ")} ORDER BY path, rank, id`)
+      .all(...args) as unknown as Row[]
+  ).map((r) => toIssue(r, key));
+}
+
+export interface IssuePatch {
+  title?: string;
+  description?: string;
+  statusId?: string;
+  assigneePersonId?: string | null;
+  priority?: number;
+  estimate?: number | null;
+}
+
+/**
+ * Edit an issue's own fields.
+ *
+ * `expectedVersion` guards the fields people type into: two people editing the same
+ * description should not silently lose one of them. Drag-driven changes deliberately do
+ * not pass a version — there, last write wins is what a user expects, and a conflict
+ * dialog mid-drag would be absurd.
+ */
+export function updateIssue(
+  id: string,
+  patch: IssuePatch,
+  expectedVersion?: number,
+): Issue | IssueError {
+  const outcome = withWrite((tx): IssueError | null => {
+    const current = tx.prepare("SELECT * FROM issues WHERE id = ?").get(id) as unknown as
+      | Row
+      | undefined;
+    if (!current) return "not-found";
+
+    const sets: string[] = [];
+    const args: (string | number | null)[] = [];
+    const set = (column: string, value: string | number | null) => {
+      sets.push(`${column} = ?`);
+      args.push(value);
+    };
+
+    if (patch.title !== undefined) set("title", patch.title);
+    if (patch.description !== undefined) set("description", patch.description);
+    if (patch.assigneePersonId !== undefined) set("assignee_person_id", patch.assigneePersonId);
+    if (patch.priority !== undefined) set("priority", patch.priority);
+    if (patch.estimate !== undefined) set("estimate", patch.estimate);
+
+    if (patch.statusId !== undefined) {
+      const status = tx
+        .prepare("SELECT is_done FROM statuses WHERE id = ? AND project_id = ?")
+        .get(patch.statusId, String(current.project_id)) as { is_done: number } | undefined;
+      if (!status) return "not-found";
+      set("status_id", patch.statusId);
+      // Stamped here so cycle time is a column rather than a scan of the activity log.
+      set("resolved_at", status.is_done === 1 ? new Date().toISOString() : null);
+    }
+
+    if (!sets.length) return null;
+    set("updated_at", new Date().toISOString());
+
+    const where = expectedVersion === undefined ? "id = ?" : "id = ? AND version = ?";
+    const whereArgs = expectedVersion === undefined ? [id] : [id, expectedVersion];
+    const { changes } = tx
+      .prepare(`UPDATE issues SET ${sets.join(", ")}, version = version + 1 WHERE ${where}`)
+      .run(...args, ...whereArgs);
+
+    return changes === 0 ? "conflict" : null;
+  });
+
+  return outcome ?? getIssue(id)!;
+}
+
+export interface MoveIssue {
+  /** Undefined leaves the parent alone; null detaches to the top of the tree. */
+  parentId?: string | null;
+  /** New neighbours among the destination's children, for ordering. */
+  afterId?: string | null;
+  beforeId?: string | null;
+}
+
+/**
+ * Re-parent and/or reorder, in one transaction.
+ *
+ * The subtree is rewritten by a single UPDATE over an indexed path range. The checks
+ * before it — legal parent type, no cycle, depth still within bounds counting the whole
+ * subtree — all run first, because an illegal move is refused outright rather than
+ * coerced into something legal.
+ */
+export function moveIssue(id: string, move: MoveIssue): Issue | IssueError {
+  const outcome = withWrite((tx): IssueError | null => {
+    const mover = tx.prepare("SELECT * FROM issues WHERE id = ?").get(id) as unknown as
+      | Row
+      | undefined;
+    if (!mover) return "not-found";
+
+    const projectId = String(mover.project_id);
+    const type = String(mover.type) as IssueType;
+    const reparenting = move.parentId !== undefined;
+    const newParentId: string | null = reparenting
+      ? (move.parentId ?? null)
+      : mover.parent_id == null
+        ? null
+        : String(mover.parent_id);
+
+    let parent: Row | undefined;
+    if (newParentId) {
+      parent = tx
+        .prepare("SELECT * FROM issues WHERE id = ? AND project_id = ?")
+        .get(newParentId, projectId) as unknown as Row | undefined;
+      if (!parent) return "no-parent";
+      if (!PARENT_RULES[type].includes(String(parent.type) as IssueType)) return "illegal-parent";
+    } else if (!ROOT_TYPES.includes(type)) {
+      return "illegal-root";
+    }
+
+    const oldPrefix = prefixOf({ path: String(mover.path), id });
+
+    if (parent) {
+      // Dropping something inside its own subtree would detach that subtree from the tree.
+      const target = `${String(parent.path)}${String(parent.id)}/`;
+      if (target.startsWith(oldPrefix) || String(parent.id) === id) return "cycle";
+    }
+
+    const newDepth = parent ? Number(parent.depth) + 1 : 0;
+    const { maxDepth } = tx
+      .prepare(
+        "SELECT COALESCE(MAX(depth), ?) AS maxDepth FROM issues WHERE project_id = ? AND path >= ? AND path < ?",
+      )
+      .get(Number(mover.depth), projectId, oldPrefix, rangeEnd(oldPrefix)) as { maxDepth: number };
+    // A CHECK alone would allow a shallow move that pushes deep descendants over the cap.
+    if (newDepth + (maxDepth - Number(mover.depth)) > MAX_DEPTH) return "too-deep";
+
+    const siblingsSql = newParentId
+      ? "SELECT rank FROM issues WHERE project_id = ? AND parent_id = ? AND id <> ? ORDER BY rank"
+      : "SELECT rank FROM issues WHERE project_id = ? AND parent_id IS NULL AND id <> ? ORDER BY rank";
+    const siblingArgs = newParentId ? [projectId, newParentId, id] : [projectId, id];
+    const siblings = (tx.prepare(siblingsSql).all(...siblingArgs) as unknown as { rank: string }[])
+      .map((r) => r.rank);
+
+    let before: string | null = null;
+    let after: string | null = null;
+    if (move.afterId) {
+      const row = tx.prepare("SELECT rank FROM issues WHERE id = ?").get(move.afterId) as
+        | { rank: string }
+        | undefined;
+      before = row?.rank ?? null;
+      after = siblings.find((r) => before !== null && r > before) ?? null;
+    } else if (move.beforeId) {
+      const row = tx.prepare("SELECT rank FROM issues WHERE id = ?").get(move.beforeId) as
+        | { rank: string }
+        | undefined;
+      after = row?.rank ?? null;
+      before = [...siblings].reverse().find((r) => after !== null && r < after) ?? null;
+    } else if (reparenting) {
+      before = siblings.length ? siblings[siblings.length - 1] : null;
+    }
+
+    const rank =
+      move.afterId || move.beforeId || reparenting
+        ? rankBetween(before, after)
+        : String(mover.rank);
+
+    const newPath = parent ? `${String(parent.path)}${String(parent.id)}/` : "/";
+    const newRoot = parent ? String(parent.root_id) : id;
+    const newPrefix = `${newPath}${id}/`;
+    const delta = newDepth - Number(mover.depth);
+
+    // One statement for the whole subtree, over an indexed range. Never `path LIKE ?`,
+    // which does not use the index and would scan the project on every drag.
+    if (newPrefix !== oldPrefix || delta !== 0 || newRoot !== String(mover.root_id)) {
+      tx.prepare(
+        `UPDATE issues
+            SET path    = ? || substr(path, ?),
+                depth   = depth + ?,
+                root_id = ?
+          WHERE project_id = ? AND path >= ? AND path < ?`,
+      ).run(newPrefix, oldPrefix.length + 1, delta, newRoot, projectId, oldPrefix, rangeEnd(oldPrefix));
+    }
+
+    tx.prepare(
+      `UPDATE issues
+          SET parent_id = ?, path = ?, depth = ?, root_id = ?, rank = ?, updated_at = ?
+        WHERE id = ?`,
+    ).run(newParentId, newPath, newDepth, newRoot, rank, new Date().toISOString(), id);
+
+    return null;
+  });
+
+  return outcome ?? getIssue(id)!;
+}
+
+export function archiveIssue(id: string, archived: boolean): Issue | IssueError {
+  const outcome = withWrite((tx): IssueError | null => {
+    const { changes } = tx
+      .prepare("UPDATE issues SET archived_at = ?, updated_at = ? WHERE id = ?")
+      .run(archived ? new Date().toISOString() : null, new Date().toISOString(), id);
+    return changes === 0 ? "not-found" : null;
+  });
+  return outcome ?? getIssue(id)!;
+}
+
+/**
+ * Progress for every root at once.
+ *
+ * `GROUP BY root_id` rather than joining each root to a path prefix: the prefix form
+ * cannot use an index and measured ~100x slower at a few thousand issues.
+ */
+export interface Rollup {
+  rootId: string;
+  total: number;
+  done: number;
+}
+
+export function rollupByRoot(projectId: string): Record<string, Rollup> {
+  const rows = open()
+    .prepare(
+      `SELECT d.root_id AS root_id,
+              COUNT(*) AS total,
+              SUM(CASE WHEN s.is_done THEN 1 ELSE 0 END) AS done
+         FROM issues d
+         JOIN statuses s ON s.id = d.status_id
+        WHERE d.project_id = ? AND d.archived_at IS NULL AND d.id <> d.root_id
+        GROUP BY d.root_id`,
+    )
+    .all(projectId) as unknown as Row[];
+
+  const out: Record<string, Rollup> = {};
+  for (const r of rows) {
+    out[String(r.root_id)] = {
+      rootId: String(r.root_id),
+      total: Number(r.total),
+      done: Number(r.done),
+    };
+  }
+  return out;
 }
