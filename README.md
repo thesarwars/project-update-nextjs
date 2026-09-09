@@ -80,6 +80,10 @@ Output looks like this:
   is bookmarkable.
 - **People** — add, rename, reorder, remove. The order here is the order in the update.
   Unticking someone keeps their history but leaves them out.
+- **Previous day** — a panel down the left showing what everyone said they would do on the last
+  day with content, so you can write today's Done against it without flipping back and forth.
+  Each name has a button to pull that person's ToDo into today. Toggle the panel from the
+  header; the choice sticks.
 - **Carry over** — fills empty ToDo fields from the last day that had anything, so yesterday's
   plan starts today's. It never overwrites something you have already written.
 - **Heading / Hide empty** — toggles above the preview. `Hide empty` (on by default) drops empty
