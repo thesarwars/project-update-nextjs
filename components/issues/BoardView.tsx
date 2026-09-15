@@ -10,6 +10,7 @@ import { EmptyState, Key } from "@/components/ui";
 import { useToast } from "@/components/Toast";
 import { useDragList, type DropTarget } from "@/lib/useDragList";
 import { rankForDrop } from "@/lib/rank";
+import { applyPendingMoves, type PendingMove } from "@/lib/pendingMoves";
 import type { TimeBadge } from "@/lib/schedule";
 import { issueHref } from "@/lib/views";
 import { moveAlso, moveReport, undoMove, type MoveResult } from "@/lib/statusMove";
@@ -28,13 +29,6 @@ interface Props {
 interface Position {
   column: number;
   index: number;
-}
-
-/** A drop the server has not confirmed yet, and the server state it was made against. */
-interface Pending {
-  from: { statusId: string; boardRank: string | null };
-  statusId: string;
-  boardRank: string;
 }
 
 /** Board order, with any card that predates board_rank after the rest, oldest first. */
@@ -58,7 +52,7 @@ export default function BoardView({
   const toast = useToast();
 
   /** Optimistic overrides, so a drop paints before the server answers. */
-  const [moved, setMoved] = useState<Record<string, Pending>>({});
+  const [moved, setMoved] = useState<Record<string, PendingMove>>({});
   const [focus, setFocus] = useState<Position>({ column: 0, index: 0 });
   const [held, setHeld] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
@@ -66,23 +60,7 @@ export default function BoardView({
 
   const peopleById = useMemo(() => new Map(project.people.map((p) => [p.id, p])), [project]);
 
-  // An override applies only while the server still reports the card where it was when
-  // it was dropped. The moment the server says anything else — this drop confirmed, or a
-  // change made in the detail pane or by someone else — the server wins. Overrides used
-  // to apply forever, so a card dragged once kept its dragged column even after its
-  // status was changed somewhere else.
-  const placed = useMemo(
-    () =>
-      issues.map((issue) => {
-        const pending = moved[issue.id];
-        return pending &&
-          pending.from.statusId === issue.statusId &&
-          pending.from.boardRank === issue.boardRank
-          ? { ...issue, statusId: pending.statusId, boardRank: pending.boardRank }
-          : issue;
-      }),
-    [issues, moved],
-  );
+  const placed = useMemo(() => applyPendingMoves(issues, moved), [issues, moved]);
 
   const columns = useMemo(
     () =>
@@ -106,8 +84,10 @@ export default function BoardView({
       const others = column.cards
         .filter((c) => c.id !== id && c.boardRank !== null)
         .map((c) => ({ id: c.id, rank: c.boardRank! }));
-      const pending: Pending = {
-        from: { statusId: issue.statusId, boardRank: issue.boardRank },
+      // One write ahead of what we have been told, which is what this drop is about to
+      // produce. The answer replaces it with the version the server actually landed on.
+      const pending: PendingMove = {
+        version: issue.version + 1,
         statusId,
         boardRank: rankForDrop(others, beforeId),
       };
@@ -130,23 +110,19 @@ export default function BoardView({
 
       const result = (await res.json().catch(() => ({}))) as MoveResult;
 
-      // Paint everything the move carried, now. Only the dragged card was painted before
-      // the request — which cards would come with it is the server's answer, not
-      // something the board could know — and without this they sit in their old column
-      // until the refresh lands. That is a round trip nobody has a reason to wait for,
-      // and it reads as the board not having noticed.
+      // Paint everything the move carried, now, and re-key the dragged card to the
+      // version the server actually landed on. Only that card could be painted before the
+      // request — which cards come with it is the server's answer, not something the board
+      // could know — and without this the rest sit in their old column until the refresh
+      // lands, which reads as the board not having noticed.
       setMoved((m) => {
         const next = { ...m };
         for (const change of result.moved ?? []) {
-          if (change.id === id) continue;
-          const card = issues.find((i) => i.id === change.id);
+          const rank =
+            change.id === id ? pending.boardRank : issues.find((i) => i.id === change.id)?.boardRank;
           // A card with no board rank yet has nothing to sort by; the refresh can have it.
-          if (!card?.boardRank) continue;
-          next[change.id] = {
-            from: { statusId: change.from, boardRank: card.boardRank },
-            statusId: change.to,
-            boardRank: card.boardRank,
-          };
+          if (!rank) continue;
+          next[change.id] = { version: change.version, statusId: change.to, boardRank: rank };
         }
         return next;
       });
@@ -161,17 +137,12 @@ export default function BoardView({
             label: report.action.label,
             run: () => {
               const kind = report.action!.kind;
+              // Reversing a move writes again, so every row comes back with a version past
+              // the one these overrides are waiting for and they retire themselves. They
+              // used to need clearing by hand here, because an undo restored the exact
+              // state they were keyed to and they would re-apply.
               const done = (ok: boolean) => {
                 if (!ok) toast("Could not change all of those.");
-                // An undo restores the exact state this card was dropped from, which is
-                // what its optimistic override is keyed to — leaving the override in
-                // place would paint the card back in the column it just left, and
-                // disagree with the database. Reversing a move retires the override.
-                setMoved((m) => {
-                  const next = { ...m };
-                  for (const change of result.moved ?? []) delete next[change.id];
-                  return next;
-                });
                 router.refresh();
               };
               if (kind === "undo" && result.moveId) void undoMove(result.moveId).then(done);

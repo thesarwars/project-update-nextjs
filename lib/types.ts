@@ -239,6 +239,12 @@ export interface StatusMove {
   key: string;
   from: string;
   to: string;
+  /**
+   * The issue's version after this write. A board paints optimistically until its data
+   * reaches this, which is what tells a stale answer still in flight from an earlier
+   * action apart from a real change made after it.
+   */
+  version: number;
 }
 
 /**

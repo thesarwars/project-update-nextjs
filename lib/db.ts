@@ -2352,7 +2352,7 @@ function descendantsOf(
   const prefix = prefixOf({ path: issue.path, id: issue.id });
   return tx
     .prepare(
-      `SELECT d.id AS id, d.number AS number, d.status_id AS status_id,
+      `SELECT d.id AS id, d.number AS number, d.status_id AS status_id, d.version AS version,
               d.resolved_at AS resolved_at, s.category AS category, s.sort_order AS sort_order
          FROM issues d
          JOIN statuses s ON s.id = d.status_id
@@ -2405,9 +2405,18 @@ export function updateIssueCascading(
     const subject = named(id, Number(row.number), before);
     const issue = { id, path: String(row.path), project_id: projectId };
 
+    const version = Number(row.version) + 1;
     return isBehind(current, target)
-      ? carryForward(tx, { issue, subject, target, by, projectId, number: Number(row.number) })
-      : putBack(tx, { issue, subject, target, current, key });
+      ? carryForward(tx, {
+          issue,
+          subject,
+          target,
+          by,
+          projectId,
+          number: Number(row.number),
+          version,
+        })
+      : putBack(tx, { issue, subject, target, current, key, version });
   });
 
   if (typeof outcome === "string") return outcome;
@@ -2424,6 +2433,8 @@ function carryForward(
     by?: string | null;
     projectId: string;
     number: number;
+    /** The subject's version after the write that has already happened. */
+    version: number;
   },
 ): StatusMoveResult {
   const { issue, subject, target } = ctx;
@@ -2433,8 +2444,17 @@ function carryForward(
   const items: MoveItem[] = [
     { id: issue.id, from: subject.statusId, to: target.id, resolvedAt: null },
   ];
+  // updateIssue has already bumped the subject by one; every descendant below is about
+  // to be. Reporting the version each row ends at lets a board tell its own write apart
+  // from an older answer that has not landed yet.
   const moved: StatusMove[] = [
-    { id: issue.id, key: subject.key, from: subject.statusId, to: target.id },
+    {
+      id: issue.id,
+      key: subject.key,
+      from: subject.statusId,
+      to: target.id,
+      version: ctx.version,
+    },
   ];
 
   for (const d of descendantsOf(tx, issue)) {
@@ -2456,6 +2476,7 @@ function carryForward(
       key: `${key}-${Number(d.number)}`,
       from: String(d.status_id),
       to: target.id,
+      version: Number(d.version) + 1,
     });
   }
 
@@ -2496,11 +2517,18 @@ function putBack(
     target: Status;
     current: Status;
     key: string;
+    version: number;
   },
 ): StatusMoveResult {
   const { issue, subject, target, key } = ctx;
   const moved: StatusMove[] = [
-    { id: issue.id, key: subject.key, from: subject.statusId, to: target.id },
+    {
+      id: issue.id,
+      key: subject.key,
+      from: subject.statusId,
+      to: target.id,
+      version: ctx.version,
+    },
   ];
   const skipped: StatusChange[] = [];
   const find = tx.prepare(
@@ -2520,7 +2548,9 @@ function putBack(
     for (const item of JSON.parse(String(record.items_json)) as MoveItem[]) {
       if (item.id === issue.id) continue;
       const now = tx
-        .prepare("SELECT number, status_id FROM issues WHERE id = ? AND archived_at IS NULL")
+        .prepare(
+          "SELECT number, status_id, version FROM issues WHERE id = ? AND archived_at IS NULL",
+        )
         .get(item.id) as unknown as Row | undefined;
       if (!now) continue;
       const at = String(now.status_id);
@@ -2531,7 +2561,7 @@ function putBack(
         continue;
       }
       writeStatus(tx, item.id, item.from, item.resolvedAt);
-      moved.push({ ...named, from: at, to: item.from });
+      moved.push({ ...named, from: at, to: item.from, version: Number(now.version) + 1 });
     }
 
     tx.prepare("UPDATE status_moves SET reverted_at = ? WHERE id = ?").run(
@@ -2590,7 +2620,9 @@ export function revertStatusMove(
 
     for (const item of JSON.parse(String(record.items_json)) as MoveItem[]) {
       const now = tx
-        .prepare("SELECT number, status_id FROM issues WHERE id = ? AND archived_at IS NULL")
+        .prepare(
+          "SELECT number, status_id, version FROM issues WHERE id = ? AND archived_at IS NULL",
+        )
         .get(item.id) as unknown as Row | undefined;
       if (!now) continue;
       const at = String(now.status_id);
@@ -2600,7 +2632,7 @@ export function revertStatusMove(
         continue;
       }
       writeStatus(tx, item.id, item.from, item.resolvedAt);
-      moved.push({ ...named, from: at, to: item.from });
+      moved.push({ ...named, from: at, to: item.from, version: Number(now.version) + 1 });
     }
 
     tx.prepare("UPDATE status_moves SET reverted_at = ? WHERE id = ?").run(
