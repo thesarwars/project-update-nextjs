@@ -1,14 +1,20 @@
 import type { NextRequest } from "next/server";
-import { badRequest, json, readJsonBody, trimmedString } from "@/lib/api";
-import { createProject, getSetting, listProjects } from "@/lib/db";
+import { badRequest, json, readJsonBody, requireApiAdmin, requireApiUser, trimmedString } from "@/lib/api";
+import { createProject, getSetting, projectsVisibleTo } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  return json({ projects: listProjects(), lastProjectId: getSetting("lastProjectId") });
+export async function GET(request: NextRequest) {
+  const auth = await requireApiUser(request);
+  if (auth instanceof Response) return auth;
+
+  return json({ projects: projectsVisibleTo(auth), lastProjectId: getSetting("lastProjectId") });
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireApiAdmin(request);
+  if (auth instanceof Response) return auth;
+
   const body = await readJsonBody<{ name?: unknown; people?: unknown }>(request);
   const name = trimmedString(body?.name, 80);
   if (!name) return badRequest("A project name is required.");

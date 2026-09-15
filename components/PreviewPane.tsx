@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { LuCheck, LuCode, LuCopy, LuEye } from "react-icons/lu";
-import { Button } from "./ui";
+import { Button, Chip, TabButton } from "./ui";
 import { FLAVORS, type CopyFlavor, type RenderOptions } from "@/lib/format";
 
 interface Props {
@@ -106,53 +106,5 @@ export default function PreviewPane({
       </footer>
       <p className="px-3 pb-2.5 text-[11px] leading-4 text-muted">{activeFlavor.hint}</p>
     </div>
-  );
-}
-
-function TabButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={`inline-flex h-7 items-center gap-1.5 rounded-[7px] px-2.5 text-xs font-medium transition ${
-        active ? "bg-surface text-foreground card-shadow" : "text-muted hover:text-foreground"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Chip({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={`h-7 rounded-full border px-2.5 text-[11px] font-medium transition ${
-        active
-          ? "border-accent/40 bg-accent/10 text-accent"
-          : "border-line text-muted hover:border-line-strong hover:text-foreground"
-      }`}
-    >
-      {children}
-    </button>
   );
 }

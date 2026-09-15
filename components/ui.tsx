@@ -25,17 +25,22 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   size?: Size;
 }
 
+/** What a Button looks like, exposed so a real link can be made to look like one too. */
+export function buttonClass(variant: Variant = "secondary", size: Size = "md", extra = ""): string {
+  return `inline-flex select-none items-center justify-center font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${VARIANTS[variant]} ${SIZES[size]} ${extra}`;
+}
+
+/** The square an icon-only control sits in. */
+export function iconBoxClass(size: Size = "md"): string {
+  return size === "sm" ? "h-7 w-7" : size === "lg" ? "h-10 w-10" : "h-8 w-8";
+}
+
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
   { variant = "secondary", size = "md", className = "", type = "button", ...rest },
   ref,
 ) {
   return (
-    <button
-      ref={ref}
-      type={type}
-      className={`inline-flex select-none items-center justify-center font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${VARIANTS[variant]} ${SIZES[size]} ${className}`}
-      {...rest}
-    />
+    <button ref={ref} type={type} className={buttonClass(variant, size, className)} {...rest} />
   );
 });
 
@@ -47,14 +52,13 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
   { label, className = "", size = "md", ...rest },
   ref,
 ) {
-  const box = size === "sm" ? "h-7 w-7" : size === "lg" ? "h-10 w-10" : "h-8 w-8";
   return (
     <Button
       ref={ref}
       size={size}
       aria-label={label}
       title={label}
-      className={`!px-0 ${box} ${className}`}
+      className={`!px-0 ${iconBoxClass(size)} ${className}`}
       {...rest}
     />
   );
@@ -75,6 +79,109 @@ export function Field({
       {children}
       {hint ? <span className="text-[11px] text-muted">{hint}</span> : null}
     </label>
+  );
+}
+
+/** A keyboard key, for shortcut hints. */
+export function Key({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded border border-line bg-surface px-1 font-sans text-[10px]">
+      {children}
+    </kbd>
+  );
+}
+
+/** A round toggle used for filters and view options. */
+export function Chip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`h-7 rounded-full border px-2.5 text-[11px] font-medium transition ${
+        active
+          ? "border-accent/40 bg-accent/10 text-accent"
+          : "border-line text-muted hover:border-line-strong hover:text-foreground"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** A segmented-control tab. Wrap a group in a `rounded-lg bg-surface-sunken p-0.5` box. */
+export function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`inline-flex h-7 items-center gap-1.5 rounded-[7px] px-2.5 text-xs font-medium transition ${
+        active ? "bg-surface text-foreground card-shadow" : "text-muted hover:text-foreground"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+export type SaveState = "idle" | "saving" | "saved" | "error";
+
+/** The app-wide save indicator. Renders nothing while idle. */
+export function SaveBadge({ state }: { state: SaveState }) {
+  if (state === "idle") return null;
+  const map = {
+    saving: { text: "Saving…", color: "text-muted", dot: "bg-muted" },
+    saved: { text: "Saved", color: "text-muted", dot: "bg-success" },
+    error: { text: "Save failed", color: "text-danger", dot: "bg-danger" },
+  } as const;
+  const s = map[state];
+  return (
+    <span className={`mr-1 inline-flex items-center gap-1.5 text-[11px] ${s.color}`} role="status">
+      <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
+      {s.text}
+    </span>
+  );
+}
+
+export function EmptyState({
+  icon,
+  title,
+  body,
+  action,
+  className = "",
+}: {
+  icon?: React.ReactNode;
+  title: string;
+  body?: React.ReactNode;
+  action?: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`flex flex-col items-center gap-3 rounded-xl border border-dashed border-line-strong px-6 py-14 text-center ${className}`}
+    >
+      {icon ? <span className="text-muted">{icon}</span> : null}
+      <h2 className="text-[15px] font-semibold">{title}</h2>
+      {body ? <p className="max-w-sm text-[13px] text-muted">{body}</p> : null}
+      {action}
+    </div>
   );
 }
 

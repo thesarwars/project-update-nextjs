@@ -41,8 +41,16 @@ export function weekdayName(iso: string): string {
   return WEEKDAYS[parseISO(iso).getDay()];
 }
 
-/** "Today" / "Yesterday" / "Tomorrow" / weekday name, for the date bar. */
-export function relativeDayLabel(iso: string, today = todayISO()): string {
+/**
+ * "Today" / "Yesterday" / "Tomorrow" / weekday name, for the date bar.
+ *
+ * `today` is required rather than defaulted. It used to default to `todayISO()`, which
+ * reads whichever machine is rendering — the server's timezone during SSR and the
+ * viewer's in the browser — so the same date produced "Today" on one side and "Tomorrow"
+ * on the other, and React reported a hydration mismatch for several hours a day. Making
+ * it an argument turns that whole class of bug into a compile error.
+ */
+export function relativeDayLabel(iso: string, today: string): string {
   if (iso === today) return "Today";
   if (iso === addDays(today, -1)) return "Yesterday";
   if (iso === addDays(today, 1)) return "Tomorrow";
@@ -60,4 +68,60 @@ export function previousWorkday(iso: string): string {
   let guard = 0;
   while (isWeekend(cur) && guard++ < 7) cur = addDays(cur, -1);
   return cur;
+}
+
+export const DURATION_UNITS = ["days", "weeks", "months", "years"] as const;
+export type DurationUnit = (typeof DURATION_UNITS)[number];
+
+/**
+ * The last day of a sprint, inclusive.
+ *
+ * Stored as unit + count rather than a second date so "next sprint, same length" stays
+ * one click and the two can never disagree. Month and year arithmetic clamps rather than
+ * overflowing: a sprint starting 31 January and running one month ends 28 February, not
+ * 3 March.
+ */
+export function endOfSprint(startISO: string, unit: DurationUnit, count: number): string {
+  const start = parseISO(startISO);
+  const n = Math.max(1, Math.floor(count));
+
+  if (unit === "days") return addDays(startISO, n - 1);
+  if (unit === "weeks") return addDays(startISO, n * 7 - 1);
+
+  const months = unit === "months" ? n : n * 12;
+  const target = new Date(start.getFullYear(), start.getMonth() + months, 1);
+  const lastDayOfTarget = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  target.setDate(Math.min(start.getDate(), lastDayOfTarget));
+  // Inclusive: a one-month sprint from the 1st ends on the last day of that month.
+  target.setDate(target.getDate() - 1);
+  return toISO(target);
+}
+
+/** Working days in a range, inclusive, skipping weekends. */
+export function workingDaysBetween(startISO: string, endISO: string): number {
+  let count = 0;
+  let cursor = startISO;
+  let guard = 0;
+  while (cursor <= endISO && guard++ < 4000) {
+    if (!isWeekend(cursor)) count += 1;
+    cursor = addDays(cursor, 1);
+  }
+  return count;
+}
+
+/**
+ * Whole days from `today` until the end, or null once it has passed.
+ *
+ * `today` is required for the same reason as relativeDayLabel: a defaulted clock read
+ * diverges between the server render and the browser's.
+ */
+export function daysLeft(endISO: string, today: string): number | null {
+  if (endISO < today) return null;
+  let count = 0;
+  let cursor = today;
+  while (cursor < endISO && count < 4000) {
+    cursor = addDays(cursor, 1);
+    count += 1;
+  }
+  return count;
 }

@@ -7,7 +7,30 @@ thing out in one click, already formatted.
 npm run dev      # http://localhost:3000
 ```
 
-No accounts, no login — it runs on your machine and stores everything in `data/standup.db`.
+The first visit takes you to **/setup** to create the administrator account. Everyone else
+joins by invitation — there is no public sign-up. Everything lives in `data/standup.db`.
+
+## The team
+
+- **Accounts.** Sessions are cookie-based and stored in the database, so signing someone out
+  actually revokes them. Passwords are hashed with scrypt. There is no signing secret to
+  manage: the only secret is the database file.
+- **Invitations.** On the People screen, the ↗ button next to someone creates a one-time link
+  and copies it to your clipboard — no mail server, you send it however you already talk to
+  them. It expires in seven days, and re-inviting replaces the previous link.
+- **Claiming a place.** An invitation is issued against a *roster row*, so when someone
+  claims it they immediately own every standup entry that row has ever written. Nothing is
+  migrated or re-keyed.
+- **Roles.** `admin` manages projects, people and invitations. `member` does everything else.
+  A member sees only the projects whose roster they are on.
+- **Any member can edit any entry** in their project, deliberately — the standup is often
+  filled in by one person reading out the team's updates.
+- **No password reset.** It would need a mail server; an administrator issues a fresh
+  invitation link instead.
+
+Removing someone from the roster never deletes what they wrote: a person with entries is
+deactivated — kept, but left out of the update — and only a row that has never written
+anything is actually deleted.
 
 ## Typing
 
@@ -25,6 +48,9 @@ use every day cost you nothing.
 | `Escape` | leave the field (so `Tab` can move on) |
 | `⌘`/`Ctrl`+`Shift`+`C` | copy the whole update |
 | `⌘`/`Ctrl`+`S` | force a save (it already autosaves) |
+
+The sidebar holds **Standup**, **People** and **Settings**; the bar above it switches project
+and signs you out.
 
 So a field can hold more than a flat list:
 
@@ -91,6 +117,30 @@ Output looks like this:
 
 Edits save themselves about half a second after you stop typing; the header says when.
 
+## Issues and the standup
+
+The tracker holds the work: **epic → story → task → subtask**, plus **bugs**, which sit where
+tasks sit and can themselves parent bugs or tasks. Squares are plan items and a circle is a
+defect, so a bug nested under a bug reads differently from a subtask at a glance, and a
+`↳ sub-bug` chip appears only where the nesting is unusual.
+
+- **Board** — columns from the project's own statuses. Drag a card, or use the keyboard:
+  arrows move around, `⌥`+arrows move the card, `Space` picks it up.
+- **Backlog** — every issue in hierarchy order, with a dropdown on each row for which sprint
+  it is in.
+- **Tree** — the shape of the work. `c` adds a child, `Shift`+`c` a sibling, `Enter` saves and
+  opens the next; focus any branch to work inside it.
+- **Sprints** — you choose which epics, stories and tasks are in, and the counters follow:
+  `Epics 1/2 · Stories 3/5 · Tasks 7/10`. Nothing is typed in. A container also shows its
+  progress *within that sprint*, and children living elsewhere appear dimmed and are never
+  counted — so an epic spanning four sprints does not read as three failures.
+- **My work** — everything assigned to you, across projects.
+
+**The two halves meet.** Write `GS-14` in a standup field and the issue records that it was
+mentioned, by whom, on which day, in which section. The `+` beside each section label drops
+`- GS-14 Title` in for you, offering that person's own open issues first, so nobody retypes a
+key and gets it wrong. The text stays plain, so the copy output is exactly what it always was.
+
 ## Data
 
 Everything lives in `data/standup.db`, an ordinary SQLite file — copy it to back up, delete it
@@ -100,12 +150,25 @@ else if you would rather it lived elsewhere.
 SQLite comes from Node itself (`node:sqlite`), so there is nothing to compile — but that needs
 **Node 22.5 or newer**. Node prints one `ExperimentalWarning` about it at startup; it is harmless.
 
+Back it up with `node scripts/backup.mjs`, which snapshots through `VACUUM INTO` and verifies
+the copy before reporting success. That is safer than `cp`, which can catch a live database
+mid-write. Restore by stopping the app, moving the current file aside, and putting the backup
+in its place.
+
+`STANDUP_JOURNAL_MODE=WAL` is worth setting when the app is deployed for several people, so
+readers do not queue behind a writer. It stays `DELETE` by default, which keeps the database
+one self-contained file.
+
 ## Layout
 
 ```
-app/api/…        REST endpoints (projects, entries, carry-over, settings)
-lib/db.ts        SQLite schema and every query
+app/(app)/…      the signed-in app: standup, people, settings
+app/(auth)/…     login, first-run setup, invitation claim
+app/api/…        REST endpoints (projects, entries, carry-over, invites, settings)
+lib/db.ts        SQLite schema, migrations and every query
+lib/auth.ts      sessions and guards; lib/password.ts is the pure crypto
 lib/format.ts    editor text -> items -> markdown / rich HTML
 lib/clipboard.ts the two-format clipboard write
+components/shell the app frame both features live in
 components/      the UI; BulletEditor.tsx is the list-aware textarea
 ```

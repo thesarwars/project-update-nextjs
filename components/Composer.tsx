@@ -2,18 +2,25 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LuUsers } from "react-icons/lu";
-import Modal from "./Modal";
-import PeopleManager from "./PeopleManager";
+import Link from "next/link";
+import PaneGrid from "./layout/PaneGrid";
 import PersonCard from "./PersonCard";
 import PreviewPane from "./PreviewPane";
 import PreviousDayPanel from "./PreviousDayPanel";
-import ProjectSettings from "./ProjectSettings";
-import TopBar, { type SaveState } from "./TopBar";
-import { Button, Field, inputClass } from "./ui";
-import { copyPlain, copyRich } from "@/lib/clipboard";
-import { addDays, formatDisplayDate, isValidISODate, todayISO } from "@/lib/date";
+import StandupToolbar from "./StandupToolbar";
+import { useToast } from "./Toast";
 import {
-  DEFAULT_RENDER_OPTIONS,
+  LEGACY_PREFS_KEY,
+  PREFS_COOKIE,
+  serializePrefs,
+  type StandupPrefs,
+} from "@/lib/standupPrefs";
+import { useReportSave } from "./shell/SaveProvider";
+import { EmptyState, Key } from "./ui";
+import { copyPlain, copyRich } from "@/lib/clipboard";
+import { useRouter } from "next/navigation";
+import { addDays, formatDisplayDate, isValidISODate } from "@/lib/date";
+import {
   buildDoc,
   buildPersonDoc,
   docIsEmpty,
@@ -23,10 +30,16 @@ import {
   type RenderInput,
   type RenderOptions,
 } from "@/lib/format";
-import { SECTION_KEYS, emptyEntry, type Entry, type EntryText, type Person, type Project } from "@/lib/types";
-
-const PREFS_KEY = "standup.prefs.v1";
-const SAVE_DEBOUNCE_MS = 500;
+import { useDebouncedSave } from "@/lib/useDebouncedSave";
+import {
+  SECTION_KEYS,
+  emptyEntry,
+  type Entry,
+  type EntryText,
+  type Issue,
+  type Person,
+  type Project,
+} from "@/lib/types";
 
 interface PendingSave extends EntryText {
   projectId: string;
@@ -34,110 +47,70 @@ interface PendingSave extends EntryText {
   personId: string;
 }
 
-interface Prefs {
-  options: RenderOptions;
-  flavor: CopyFlavor;
-  showPrevious: boolean;
+/** Defined at module scope so `useDebouncedSave`'s flush stays stable across renders. */
+async function saveEntry(item: PendingSave): Promise<void> {
+  const res = await fetch("/api/entries", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(item),
+    keepalive: true,
+  });
+  if (!res.ok) throw new Error(`PUT /api/entries -> ${res.status}`);
 }
 
-/** Bookmarked ?date=, read during the first render. */
-function initialDate(): string {
-  if (typeof window === "undefined") return todayISO();
-  const fromUrl = new URL(window.location.href).searchParams.get("date");
-  return isValidISODate(fromUrl) ? fromUrl : todayISO();
-}
-
-/** Read once during the first render — the loading screen looks the same either way. */
-function loadPrefs(): Prefs {
-  const fallback: Prefs = { options: DEFAULT_RENDER_OPTIONS, flavor: "rich", showPrevious: true };
-  if (typeof window === "undefined") return fallback;
-  try {
-    const raw = window.localStorage.getItem(PREFS_KEY);
-    if (!raw) return fallback;
-    const saved = JSON.parse(raw) as Partial<Prefs>;
-    return {
-      options: { ...DEFAULT_RENDER_OPTIONS, ...saved.options },
-      flavor: saved.flavor ?? "rich",
-      showPrevious: saved.showPrevious ?? true,
-    };
-  } catch {
-    return fallback;
-  }
-}
-
-export default function Composer() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState<string | null>(null);
+export default function Composer({
+  project,
+  issuesByPerson,
+  initialDate,
+  serverToday,
+  initialPrefs,
+}: {
+  project: Project;
+  /** Each person's open issues, so a card offers their own work first. */
+  issuesByPerson: Record<string, Issue[]>;
+  /** From ?date= on the server, so the first client render agrees with the HTML. */
+  initialDate: string;
+  /** The server's calendar day, for the same reason. Corrected after mount. */
+  serverToday: string;
+  /** From a cookie, for the same reason. */
+  initialPrefs: StandupPrefs;
+}) {
   const [date, setDate] = useState<string>(initialDate);
+  // The server's day, used as-is rather than re-read from the browser's clock.
+  //
+  // It has to be one or the other, and the server's is the right one twice over: the
+  // selected date is already chosen from it a few lines up in page.tsx, so labelling it
+  // with the viewer's clock could render "Tomorrow" above a date the server called
+  // today; and a standup is a shared ritual, where everyone naming the same day matters
+  // more than each person's midnight. Reading it here during render was the hydration
+  // mismatch this replaces.
+  const today = serverToday;
   const [entries, setEntries] = useState<Record<string, Entry>>({});
   const [carry, setCarry] = useState<{ from: string | null; entries: Record<string, Entry> }>({
     from: null,
     entries: {},
   });
-  const [loading, setLoading] = useState(true);
-  const [saveState, setSaveState] = useState<SaveState>("idle");
-  const [options, setOptions] = useState<RenderOptions>(() => loadPrefs().options);
-  const [flavor, setFlavor] = useState<CopyFlavor>(() => loadPrefs().flavor);
-  const [showPrevious, setShowPrevious] = useState(() => loadPrefs().showPrevious);
+  const [options, setOptions] = useState<RenderOptions>(initialPrefs.options);
+  const [flavor, setFlavor] = useState<CopyFlavor>(initialPrefs.flavor);
+  const [showPrevious, setShowPrevious] = useState(initialPrefs.showPrevious);
   const [copied, setCopied] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
-  const [peopleOpen, setPeopleOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [newProjectName, setNewProjectName] = useState("");
-  const [newProjectPeople, setNewProjectPeople] = useState("");
 
-  const project = useMemo(
-    () => projects.find((p) => p.id === projectId) ?? null,
-    [projects, projectId],
-  );
-  const activePeople = useMemo(
-    () => (project?.people ?? []).filter((p) => p.active),
-    [project],
-  );
+  const router = useRouter();
+  const toast = useToast();
+  const reportSave = useReportSave();
+  const projectId = project.id;
+  const activePeople = useMemo(() => project.people.filter((p) => p.active), [project]);
 
   /* ---------------- persistence of edits ---------------- */
 
   const entriesRef = useRef<Record<string, Entry>>({});
-  const pending = useRef(new Map<string, PendingSave>());
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { queue, flush, state: saveState } = useDebouncedSave<PendingSave>({ save: saveEntry });
 
-  const flush = useCallback(async () => {
-    if (timer.current) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
-    const items = [...pending.current.values()];
-    if (!items.length) return;
-    pending.current.clear();
-    setSaveState("saving");
-
-    try {
-      await Promise.all(
-        items.map(async (item) => {
-          const res = await fetch("/api/entries", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(item),
-            keepalive: true,
-          });
-          if (!res.ok) throw new Error(`PUT /api/entries -> ${res.status}`);
-        }),
-      );
-      setSaveState(pending.current.size ? "saving" : "saved");
-    } catch {
-      // Put them back so the next keystroke retries; never clobber newer edits.
-      for (const item of items) {
-        const key = `${item.projectId}|${item.date}|${item.personId}`;
-        if (!pending.current.has(key)) pending.current.set(key, item);
-      }
-      setSaveState("error");
-    }
-  }, []);
+  // One badge in the global bar, fed by whichever editor is active.
+  useEffect(() => reportSave(saveState), [saveState, reportSave]);
 
   const updateEntry = useCallback(
     (personId: string, patch: Partial<EntryText>) => {
-      if (!projectId) return;
       const current = entriesRef.current[personId] ?? emptyEntry();
       const next: Entry = { ...current, ...patch };
       entriesRef.current = { ...entriesRef.current, [personId]: next };
@@ -145,69 +118,14 @@ export default function Composer() {
 
       const text = {} as EntryText;
       for (const key of SECTION_KEYS) text[key] = next[key];
-      pending.current.set(`${projectId}|${date}|${personId}`, {
-        projectId,
-        date,
-        personId,
-        ...text,
-      });
-      setSaveState("saving");
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => void flush(), SAVE_DEBOUNCE_MS);
+      queue(`${projectId}|${date}|${personId}`, { projectId, date, personId, ...text });
     },
-    [projectId, date, flush],
+    [projectId, date, queue],
   );
-
-  // Don't lose the last keystrokes when the tab goes away.
-  useEffect(() => {
-    const onHide = () => {
-      if (document.visibilityState === "hidden") void flush();
-    };
-    const onUnload = () => void flush();
-    document.addEventListener("visibilitychange", onHide);
-    window.addEventListener("pagehide", onUnload);
-    return () => {
-      document.removeEventListener("visibilitychange", onHide);
-      window.removeEventListener("pagehide", onUnload);
-    };
-  }, [flush]);
-
-  /* ---------------- initial load ---------------- */
-
-  useEffect(() => {
-    const urlProject = new URL(window.location.href).searchParams.get("project");
-
-    (async () => {
-      try {
-        const res = await fetch("/api/projects");
-        const data = (await res.json()) as { projects: Project[]; lastProjectId: string | null };
-        setProjects(data.projects);
-        const chosen =
-          data.projects.find((p) => p.id === urlProject)?.id ??
-          data.projects.find((p) => p.id === data.lastProjectId)?.id ??
-          data.projects[0]?.id ??
-          null;
-        setProjectId(chosen);
-      } catch {
-        setToast("Could not reach the server.");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify({ options, flavor, showPrevious }));
-    } catch {
-      /* private mode */
-    }
-  }, [options, flavor, showPrevious]);
 
   /* ---------------- load a day ---------------- */
 
   useEffect(() => {
-    if (!projectId) return; // the empty state is showing; nothing reads entries
     let cancelled = false;
 
     (async () => {
@@ -243,18 +161,17 @@ export default function Composer() {
           if (!cancelled) setCarry(previous);
         }
       } catch {
-        if (!cancelled) setToast("Could not load that day.");
+        if (!cancelled) toast("Could not load that day.");
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [projectId, date, flush]);
+  }, [projectId, date, flush, toast]);
 
   // Keep the URL in step so a day is bookmarkable, without a router round-trip.
   useEffect(() => {
-    if (!projectId) return;
     const url = new URL(window.location.href);
     url.searchParams.set("project", projectId);
     url.searchParams.set("date", date);
@@ -266,20 +183,40 @@ export default function Composer() {
     }).catch(() => undefined);
   }, [projectId, date]);
 
+  useEffect(() => {
+    document.cookie = `${PREFS_COOKIE}=${serializePrefs({ options, flavor, showPrevious })}; path=/; max-age=${60 * 60 * 24 * 365}; samesite=lax`;
+  }, [options, flavor, showPrevious]);
+
+  // One-time carry-over of settings that predate the cookie. Writes the cookie and asks
+  // the server to re-render with it; after that the branch never runs again.
+  useEffect(() => {
+    if (document.cookie.includes(`${PREFS_COOKIE}=`)) return;
+    let legacy: string | null = null;
+    try {
+      legacy = localStorage.getItem(LEGACY_PREFS_KEY);
+    } catch {
+      /* private mode */
+    }
+    if (!legacy) return;
+    document.cookie = `${PREFS_COOKIE}=${encodeURIComponent(legacy)}; path=/; max-age=${60 * 60 * 24 * 365}; samesite=lax`;
+    try {
+      localStorage.removeItem(LEGACY_PREFS_KEY);
+    } catch {
+      /* ignore */
+    }
+    router.refresh();
+  }, [router]);
+
   /* ---------------- rendering the update ---------------- */
 
-  const renderInput: RenderInput | null = useMemo(
-    () => (project ? { project, dateISO: date, people: project.people, entries } : null),
+  const renderInput: RenderInput = useMemo(
+    () => ({ project, dateISO: date, people: project.people, entries }),
     [project, date, entries],
   );
-
-  const doc = useMemo(
-    () => (renderInput ? buildDoc(renderInput, options) : null),
-    [renderInput, options],
-  );
-  const html = useMemo(() => (doc ? renderHtml(doc) : ""), [doc]);
-  const text = useMemo(() => (doc ? renderPlainText(doc, flavor) : ""), [doc, flavor]);
-  const isEmpty = !doc || docIsEmpty(doc);
+  const doc = useMemo(() => buildDoc(renderInput, options), [renderInput, options]);
+  const html = useMemo(() => renderHtml(doc), [doc]);
+  const text = useMemo(() => renderPlainText(doc, flavor), [doc, flavor]);
+  const isEmpty = docIsEmpty(doc);
 
   const showCopied = useCallback((key: string) => {
     setCopied(key);
@@ -292,21 +229,18 @@ export default function Composer() {
       const ok =
         flavor === "rich" ? await copyRich(renderHtml(target), plain) : await copyPlain(plain);
       if (ok) showCopied(key);
-      else setToast("Copy was blocked — use the Text tab and copy by hand.");
+      else toast("Copy was blocked — use the Text tab and copy by hand.");
     },
-    [flavor, showCopied],
+    [flavor, showCopied, toast],
   );
 
   const copyAll = useCallback(() => {
-    if (!doc || docIsEmpty(doc)) return;
+    if (docIsEmpty(doc)) return;
     void copyDoc("all", doc);
   }, [doc, copyDoc]);
 
   const copyPerson = useCallback(
-    (personId: string) => {
-      if (!renderInput) return;
-      void copyDoc(personId, buildPersonDoc(renderInput, personId, options));
-    },
+    (personId: string) => void copyDoc(personId, buildPersonDoc(renderInput, personId, options)),
     [renderInput, options, copyDoc],
   );
 
@@ -327,13 +261,7 @@ export default function Composer() {
     return () => window.removeEventListener("keydown", onKey);
   }, [copyAll, flush]);
 
-  useEffect(() => {
-    if (!toast) return;
-    const id = setTimeout(() => setToast(null), 3200);
-    return () => clearTimeout(id);
-  }, [toast]);
-
-  /* ---------------- actions ---------------- */
+  /* ---------------- carry over ---------------- */
 
   const carryOne = useCallback(
     (person: Person) => {
@@ -355,138 +283,73 @@ export default function Composer() {
       updateEntry(person.id, { todo: previous });
       filled += 1;
     }
-    setToast(
+    toast(
       filled
         ? `Pulled ${filled} ${filled === 1 ? "person" : "people"} forward from ${formatDisplayDate(carry.from!)}.`
         : "Nothing to carry over — those fields already have something.",
     );
-  }, [activePeople, carry, updateEntry]);
-
-  const patchProject = useCallback(
-    async (id: string, patch: Record<string, unknown>) => {
-      const res = await fetch(`/api/projects/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) {
-        setToast("That change did not save.");
-        return;
-      }
-      const { project: updated } = (await res.json()) as { project: Project };
-      setProjects((list) => list.map((p) => (p.id === updated.id ? updated : p)));
-    },
-    [],
-  );
-
-  const createProject = useCallback(async () => {
-    const name = newProjectName.trim();
-    if (!name) return;
-    const people = newProjectPeople
-      .split(/[\n,]/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const res = await fetch("/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, people }),
-    });
-    if (!res.ok) {
-      setToast("Could not create that project.");
-      return;
-    }
-    const { project: created } = (await res.json()) as { project: Project };
-    setProjects((list) => [...list, created]);
-    setProjectId(created.id);
-    setNewProjectOpen(false);
-    setNewProjectName("");
-    setNewProjectPeople("");
-  }, [newProjectName, newProjectPeople]);
-
-  const removeProject = useCallback(async () => {
-    if (!project) return;
-    const res = await fetch(`/api/projects/${project.id}`, { method: "DELETE" });
-    if (!res.ok) {
-      setToast("Could not delete that project.");
-      return;
-    }
-    const remaining = projects.filter((p) => p.id !== project.id);
-    setProjects(remaining);
-    setProjectId(remaining[0]?.id ?? null);
-  }, [project, projects]);
+  }, [activePeople, carry, updateEntry, toast]);
 
   /* ---------------- render ---------------- */
 
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center text-[13px] text-muted">
-        Loading…
-      </div>
-    );
-  }
-
-  if (!project) {
-    return (
-      <>
-        <EmptyProjects onCreate={() => setNewProjectOpen(true)} />
-        <NewProjectModal
-          open={newProjectOpen}
-          onClose={() => setNewProjectOpen(false)}
-          name={newProjectName}
-          onNameChange={setNewProjectName}
-          people={newProjectPeople}
-          onPeopleChange={setNewProjectPeople}
-          onCreate={createProject}
-        />
-      </>
-    );
-  }
-
   return (
-    <div className="flex min-h-screen flex-col lg:h-screen lg:min-h-0 lg:overflow-hidden">
-      <TopBar
-        projects={projects}
-        projectId={project.id}
-        onProjectChange={setProjectId}
-        onNewProject={() => setNewProjectOpen(true)}
+    <>
+      <StandupToolbar
         date={date}
         onDateChange={(d) => isValidISODate(d) && setDate(d)}
         onStepDate={(delta) => setDate((d) => addDays(d, delta))}
-        onToday={() => setDate(todayISO())}
-        isToday={date === todayISO()}
+        today={today}
+        onToday={() => setDate(today)}
+        isToday={date === today}
         carryFrom={carry.from ? formatDisplayDate(carry.from) : null}
         onCarryOver={carryAll}
         showPrevious={showPrevious}
         onTogglePrevious={() => setShowPrevious((v) => !v)}
-        onManagePeople={() => setPeopleOpen(true)}
-        onOpenSettings={() => setSettingsOpen(true)}
-        saveState={saveState}
       />
 
-      {/* Two independent scroll panes on a wide screen; one ordinary page below that. */}
-      {/* Three independent scroll panes on a wide screen; one ordinary page below that. */}
-      <main
-        className={`mx-auto grid w-full max-w-[1500px] flex-1 gap-4 px-4 py-4 lg:min-h-0 lg:overflow-hidden ${
-          showPrevious
-            ? "lg:grid-cols-[210px_minmax(0,1fr)_340px] xl:grid-cols-[250px_minmax(0,1fr)_400px]"
-            : "lg:grid-cols-[minmax(0,1fr)_420px]"
-        }`}
-      >
-        {showPrevious ? (
-          <div className="order-first max-h-[45vh] lg:max-h-none lg:min-h-0">
+      <PaneGrid
+        columns={showPrevious ? "aside+main+detail" : "main+detail"}
+        aside={
+          showPrevious ? (
             <PreviousDayPanel
               from={carry.from}
+              today={today}
               entries={carry.entries}
               people={activePeople}
               todoLabel={project.labels.todo}
               onCarry={carryOne}
             />
-          </div>
-        ) : null}
-
-        <div className="flex flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1 thin-scroll">
+          ) : undefined
+        }
+        detail={
+          <PreviewPane
+            html={html}
+            text={text}
+            isEmpty={isEmpty}
+            flavor={flavor}
+            onFlavorChange={setFlavor}
+            options={options}
+            onOptionsChange={setOptions}
+            copied={copied === "all"}
+            onCopy={copyAll}
+          />
+        }
+      >
+        <>
           {activePeople.length === 0 ? (
-            <EmptyPeople onManage={() => setPeopleOpen(true)} />
+            <EmptyState
+              icon={<LuUsers className="h-6 w-6" />}
+              title="No one on this standup yet"
+              body="Add the people who report in this standup."
+              action={
+                <Link
+                  href={`/team?project=${encodeURIComponent(projectId)}`}
+                  className="inline-flex h-8 items-center rounded-lg bg-accent px-3 text-[13px] font-medium text-accent-contrast transition hover:brightness-110"
+                >
+                  Add people
+                </Link>
+              }
+            />
           ) : (
             activePeople.map((person) => (
               <PersonCard
@@ -503,6 +366,7 @@ export default function Composer() {
                 onChange={(patch) => updateEntry(person.id, patch)}
                 onCopy={() => copyPerson(person.id)}
                 onCarry={() => carryOne(person)}
+                issues={issuesByPerson[person.id] ?? []}
               />
             ))
           )}
@@ -520,144 +384,11 @@ export default function Composer() {
               <Key>Backspace</Key> over the <code className="font-mono">-</code> makes a sub-header
             </span>
             <span>
-              <Key>{"\u2318"}</Key>+<Key>Shift</Key>+<Key>C</Key> copy everything
+              <Key>{"⌘"}</Key>+<Key>Shift</Key>+<Key>C</Key> copy everything
             </span>
           </div>
-        </div>
-
-        <div className="lg:min-h-0">
-          <PreviewPane
-            html={html}
-            text={text}
-            isEmpty={isEmpty}
-            flavor={flavor}
-            onFlavorChange={setFlavor}
-            options={options}
-            onOptionsChange={setOptions}
-            copied={copied === "all"}
-            onCopy={copyAll}
-          />
-        </div>
-      </main>
-
-      <PeopleManager
-        open={peopleOpen}
-        onClose={() => setPeopleOpen(false)}
-        people={project.people}
-        onSave={(people) => patchProject(project.id, { people })}
-      />
-      <ProjectSettings
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        project={project}
-        onSave={(patch) => patchProject(project.id, patch)}
-        onDelete={removeProject}
-      />
-      <NewProjectModal
-        open={newProjectOpen}
-        onClose={() => setNewProjectOpen(false)}
-        name={newProjectName}
-        onNameChange={setNewProjectName}
-        people={newProjectPeople}
-        onPeopleChange={setNewProjectPeople}
-        onCreate={createProject}
-      />
-
-      {toast ? (
-        <div
-          role="status"
-          className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-full border border-line bg-surface px-4 py-2 text-[12.5px] card-shadow"
-        >
-          {toast}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function Key({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="rounded border border-line bg-surface px-1 font-sans text-[10px]">{children}</kbd>
-  );
-}
-
-function EmptyProjects({ onCreate }: { onCreate: () => void }) {
-  return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-3 px-6 text-center">
-      <h1 className="text-lg font-semibold">No projects yet</h1>
-      <p className="max-w-sm text-[13px] text-muted">
-        A project holds one team&apos;s standup — its people, its heading, and every day you write.
-      </p>
-      <Button variant="primary" size="lg" onClick={onCreate}>
-        Create a project
-      </Button>
-    </div>
-  );
-}
-
-function EmptyPeople({ onManage }: { onManage: () => void }) {
-  return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line-strong px-6 py-14 text-center">
-      <LuUsers className="h-6 w-6 text-muted" />
-      <p className="text-[13px] text-muted">Add the people who report in this standup.</p>
-      <Button variant="primary" onClick={onManage}>
-        Add people
-      </Button>
-    </div>
-  );
-}
-
-function NewProjectModal({
-  open,
-  onClose,
-  name,
-  onNameChange,
-  people,
-  onPeopleChange,
-  onCreate,
-}: {
-  open: boolean;
-  onClose: () => void;
-  name: string;
-  onNameChange: (v: string) => void;
-  people: string;
-  onPeopleChange: (v: string) => void;
-  onCreate: () => void;
-}) {
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="New project"
-      footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={onCreate} disabled={!name.trim()}>
-            Create
-          </Button>
         </>
-      }
-    >
-      <div className="flex flex-col gap-4">
-        <Field label="Project name">
-          <input
-            value={name}
-            onChange={(e) => onNameChange(e.target.value)}
-            placeholder="Go Style"
-            className={inputClass}
-            data-autofocus
-          />
-        </Field>
-        <Field label="People" hint="One per line, or comma separated. You can change these later.">
-          <textarea
-            value={people}
-            onChange={(e) => onPeopleChange(e.target.value)}
-            rows={5}
-            placeholder={"Nihal\nNazirul\nSaad"}
-            className="w-full resize-y rounded-lg border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
-          />
-        </Field>
-      </div>
-    </Modal>
+      </PaneGrid>
+    </>
   );
 }

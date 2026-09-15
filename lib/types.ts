@@ -16,6 +16,12 @@ export interface Person {
   active: boolean;
 }
 
+/** Hours in a working day — what turns an estimate in hours into a number of days. */
+export const DEFAULT_HOURS_PER_DAY = 8;
+
+/** Weekday numbers that are worked, 0 = Sunday. Monday to Friday by default. */
+export const DEFAULT_WORKING_DAYS: readonly number[] = [1, 2, 3, 4, 5];
+
 export interface Project {
   id: string;
   name: string;
@@ -24,6 +30,12 @@ export interface Project {
   labels: Record<SectionKey, string>;
   people: Person[];
   createdAt: string;
+  /** The working day an estimate is measured against, so 16h can read as "2d". */
+  hoursPerDay: number;
+  /** Which weekdays work happens on, 0 = Sunday. Never empty. */
+  workingDays: number[];
+  /** Where the projected schedule starts. Null means "from today". */
+  scheduleStart: string | null;
 }
 
 /** Raw editor text per section: one item per line, `- ` prefixed; indented lines continue the item above. */
@@ -45,3 +57,310 @@ export const emptyEntry = (): Entry => ({
 
 export const isBlankEntry = (entry: Entry | undefined): boolean =>
   !entry || SECTION_KEYS.every((key) => !entry[key].trim());
+
+/* ------------------------------------------------------------------ *
+ * Accounts
+ * ------------------------------------------------------------------ */
+
+export const ROLES = ["admin", "member"] as const;
+export type Role = (typeof ROLES)[number];
+
+/**
+ * Deliberately two roles, not three. In a team this size a "viewer" is a manager with
+ * nothing assigned — a third global role taxes every permission check and is wrong the
+ * first time they want to comment. Read-only, if it is ever needed, belongs on the
+ * per-project membership rather than on the account.
+ */
+export const USER_STATUSES = ["active", "invited", "disabled"] as const;
+export type UserStatus = (typeof USER_STATUSES)[number];
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  role: Role;
+  status: UserStatus;
+  /** False until the account has a password — an invited user cannot sign in yet. */
+  hasPassword: boolean;
+  /**
+   * When the address was proven by entering a code we mailed to it. Null blocks sign-in:
+   * it is what keeps a half-finished signup from becoming a usable account, and what
+   * stops someone claiming a colleague's address by typing it into the signup form.
+   */
+  emailVerifiedAt: string | null;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+export interface Session {
+  id: string;
+  userId: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+}
+
+export interface Invite {
+  id: string;
+  email: string;
+  name: string | null;
+  role: Role;
+  personId: string | null;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+}
+
+/* ------------------------------------------------------------------ *
+ * Issues
+ * ------------------------------------------------------------------ */
+
+export const ISSUE_TYPES = ["epic", "story", "task", "bug", "subtask"] as const;
+export type IssueType = (typeof ISSUE_TYPES)[number];
+
+/**
+ * Which types may be a given type's parent.
+ *
+ * `bug` shares a level with `task` and has the same parents — anywhere a task is legal, a
+ * bug is. They differ only in children: a bug may parent tasks, bugs and subtasks, while
+ * a task parents only subtasks, because a task under a task *is* a subtask.
+ *
+ * `bug -> bug` makes this graph cyclic, which is exactly why the hierarchy cannot be
+ * encoded in table structure and lives in data instead.
+ */
+export const PARENT_RULES: Record<IssueType, readonly IssueType[]> = {
+  epic: [],
+  story: ["epic"],
+  task: ["story", "epic", "bug"],
+  bug: ["story", "epic", "bug"],
+  subtask: ["task", "bug"],
+};
+
+/** Types that may sit at the top of the tree with no parent. */
+export const ROOT_TYPES: readonly IssueType[] = ["epic", "story", "task", "bug"];
+
+/**
+ * `bug -> bug` is unbounded from the rules alone, so nesting is capped explicitly.
+ * This is the deepest allowed *depth value*, and a root is depth 0 — so seven levels,
+ * which is already past anything a team this size should be building.
+ */
+export const MAX_DEPTH = 6;
+
+export const ISSUE_TYPE_META: Record<
+  IssueType,
+  { label: string; level: number; sortOrder: number }
+> = {
+  epic: { label: "Epic", level: 1, sortOrder: 0 },
+  story: { label: "Story", level: 2, sortOrder: 1 },
+  task: { label: "Task", level: 3, sortOrder: 2 },
+  bug: { label: "Bug", level: 3, sortOrder: 3 },
+  subtask: { label: "Subtask", level: 4, sortOrder: 4 },
+};
+
+export const STATUS_CATEGORIES = ["todo", "in_progress", "done"] as const;
+export type StatusCategory = (typeof STATUS_CATEGORIES)[number];
+
+/**
+ * `isDone` is the only thing completion arithmetic ever reads — no query compares a
+ * status *name*. That is what lets "Won't do" close an issue, and lets a project rename
+ * "Done" to "Shipped" without touching a line of SQL.
+ */
+export const DEFAULT_STATUSES = [
+  { name: "To do", category: "todo", isDone: false, isDefault: true, color: "#666b74" },
+  { name: "In progress", category: "in_progress", isDone: false, isDefault: false, color: "#2563eb" },
+  { name: "In review", category: "in_progress", isDone: false, isDefault: false, color: "#7c3aed" },
+  { name: "Blocked", category: "in_progress", isDone: false, isDefault: false, color: "#c93b3b" },
+  { name: "Done", category: "done", isDone: true, isDefault: false, color: "#0a8354" },
+  { name: "Won't do", category: "done", isDone: true, isDefault: false, color: "#666b74" },
+] as const satisfies readonly {
+  name: string;
+  category: StatusCategory;
+  isDone: boolean;
+  isDefault: boolean;
+  color: string;
+}[];
+
+export interface Status {
+  id: string;
+  projectId: string;
+  name: string;
+  category: StatusCategory;
+  isDone: boolean;
+  isDefault: boolean;
+  color: string;
+  sortOrder: number;
+}
+
+/** How far along each category is. The only place the three are ranked against each other. */
+export const CATEGORY_ORDER: Record<StatusCategory, number> = {
+  todo: 0,
+  in_progress: 1,
+  done: 2,
+};
+
+/** Ordered by category first, then by the project's own order within it. */
+export function compareStatus(
+  a: Pick<Status, "category" | "sortOrder">,
+  b: Pick<Status, "category" | "sortOrder">,
+): number {
+  const byCategory = CATEGORY_ORDER[a.category] - CATEGORY_ORDER[b.category];
+  return byCategory !== 0 ? byCategory : a.sortOrder - b.sortOrder;
+}
+
+/**
+ * Is `status` short of `target`?
+ *
+ * What decides whether a cascade touches a descendant. Reading the project's own status
+ * order rather than a name means renaming "Done" to "Shipped", or inserting a column, is
+ * still just data — the same reason `isDone` exists.
+ */
+export const isBehind = (
+  status: Pick<Status, "category" | "sortOrder">,
+  target: Pick<Status, "category" | "sortOrder">,
+): boolean => compareStatus(status, target) < 0;
+
+/** Where an issue was before a cascade moved it — what makes undo possible. */
+export interface StatusChange {
+  id: string;
+  key: string;
+  /** The status it had, not the one it was moved to. */
+  statusId: string;
+}
+
+/**
+ * One issue a move changed, and both ends of the change.
+ *
+ * `to` is what lets a board paint a carried card the moment the answer arrives instead of
+ * waiting for the next server render — and in a put-back each card returns to its own
+ * recorded status, so one target for the whole list would not do.
+ */
+export interface StatusMove {
+  id: string;
+  key: string;
+  from: string;
+  to: string;
+  /**
+   * The issue's version after this write. A board paints optimistically until its data
+   * reaches this, which is what tells a stale answer still in flight from an earlier
+   * action apart from a real change made after it.
+   */
+  version: number;
+}
+
+/**
+ * The outcome of a status change that may have carried other issues with it.
+ *
+ * Moving a parent forward takes the work behind it along; moving it back puts down
+ * exactly what that move picked up, and nothing else. The three lists are what the
+ * person who made the move needs to be told.
+ */
+export interface StatusMoveResult {
+  /** The record this wrote, when there is one to put back. Null for a revert. */
+  moveId: string | null;
+  /** The status the subject ended up in. */
+  statusId: string;
+  /** What changed, subject first, each with where it came from and went to. */
+  moved: StatusMove[];
+  /** Recorded as carried, but left alone because they have moved on since. */
+  skipped: StatusChange[];
+  /**
+   * Descendants still sitting in the status the subject just left, offered when there
+   * was no record to replay. The app asks rather than guessing which of them belong.
+   */
+  offer: StatusChange[];
+}
+
+export const PRIORITIES = [1, 2, 3, 4, 5] as const;
+export const PRIORITY_LABELS: Record<number, string> = {
+  1: "Highest",
+  2: "High",
+  3: "Medium",
+  4: "Low",
+  5: "Lowest",
+};
+
+export interface Issue {
+  id: string;
+  projectId: string;
+  /** Rendered with the project key as `GS-142`; stored as an integer. */
+  number: number;
+  key: string;
+  type: IssueType;
+  parentId: string | null;
+  statusId: string;
+  title: string;
+  description: string;
+  /** A roster row, not an account — so someone who has not signed up is still assignable. */
+  assigneePersonId: string | null;
+  reporterUserId: string | null;
+  priority: number;
+  /**
+   * Effort in hours, always — days are a display built from the project's working day.
+   * Only read on an issue with no children: a parent's estimate is the sum of its
+   * children's, so the typed value is kept but ignored until the children are gone.
+   */
+  estimate: number | null;
+  /** Optional pin: nothing in this subtree is scheduled before this date. */
+  startDate: string | null;
+  /** Optional deadline. The projected finish is compared against it, never clamped to it. */
+  dueDate: string | null;
+  /** Order among tree siblings only — first children of different parents share keys. */
+  rank: string;
+  /** Order on the board, one sequence per project. Null only until the backfill on open. */
+  boardRank: string | null;
+  /** `/id/id/` of every ancestor. Derived from parentId, never edited directly. */
+  path: string;
+  depth: number;
+  rootId: string;
+  /** Bumped on every edit, so two people saving the same field cannot silently overwrite. */
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+  archivedAt: string | null;
+}
+
+/* ------------------------------------------------------------------ *
+ * Sprints
+ * ------------------------------------------------------------------ */
+
+export const SPRINT_STATES = ["planned", "active", "closed"] as const;
+export type SprintState = (typeof SPRINT_STATES)[number];
+
+/**
+ * Which types may sit in more than one open sprint at a time.
+ *
+ * An epic legitimately spans sprints — that is the whole reason scope is a join table.
+ * Task-level work does not: it is either being done now or it is not, so adding it to a
+ * second sprint moves it rather than duplicating it.
+ */
+export const MULTI_SPRINT_TYPES: readonly IssueType[] = ["epic", "story"];
+
+export interface Sprint {
+  id: string;
+  projectId: string;
+  name: string;
+  goal: string;
+  durationUnit: "days" | "weeks" | "months" | "years";
+  durationCount: number;
+  startDate: string | null;
+  endDate: string | null;
+  state: SprintState;
+  closedAt: string | null;
+  sortOrder: number;
+}
+
+/** Set versus completed, per issue type — derived, never stored while a sprint is open. */
+export interface SprintCount {
+  type: IssueType;
+  set: number;
+  completed: number;
+  inProgress: number;
+}
+
+/** An epic's progress *within one sprint*, separate from whether the epic itself is done. */
+export interface SprintEpicProgress {
+  issueId: string;
+  inSprintChildren: number;
+  inSprintDone: number;
+}
