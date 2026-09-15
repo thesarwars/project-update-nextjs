@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { LuMaximize2, LuPlus, LuX } from "react-icons/lu";
 import BulletEditor from "@/components/BulletEditor";
 import IssueTypeIcon, { relationshipLabel } from "./IssueTypeIcon";
@@ -95,8 +95,17 @@ export default function IssueDetail({
   backHref,
 }: Props) {
   const router = useRouter();
+  const params = useSearchParams();
   const toast = useToast();
   const reportSave = useReportSave();
+
+  /**
+   * Every link out of here keeps the query it was reached with — which project, and which
+   * list this was opened from. Dropping it was what left the close button guessing after
+   * a step up to a parent or out to the full page.
+   */
+  const query = params.toString();
+  const issueLink = (key: string) => (query ? `/i/${key}?${query}` : `/i/${key}`);
 
   const [title, setTitle] = useState(issue.title);
   const [description, setDescription] = useState(issue.description);
@@ -183,7 +192,7 @@ export default function IssueDetail({
         <nav aria-label="Ancestors" className="flex min-w-0 items-center gap-1 text-[11.5px] text-muted">
           {ancestors.map((a) => (
             <span key={a.id} className="flex min-w-0 items-center gap-1">
-              <Link href={`/i/${a.key}`} className="flex min-w-0 items-center gap-1 hover:text-foreground">
+              <Link href={issueLink(a.key)} className="flex min-w-0 items-center gap-1 hover:text-foreground">
                 <IssueTypeIcon type={a.type} size={12} />
                 <span className="truncate">{a.key}</span>
               </Link>
@@ -198,7 +207,7 @@ export default function IssueDetail({
 
         <span className="ml-auto flex items-center gap-0.5">
           {layout === "pane" ? (
-            <IconButton label="Open full page" variant="ghost" size="sm" onClick={() => router.push(`/i/${issue.key}`)}>
+            <IconButton label="Open full page" variant="ghost" size="sm" onClick={() => router.push(issueLink(issue.key))}>
               <LuMaximize2 className="h-3.5 w-3.5" />
             </IconButton>
           ) : null}
@@ -258,7 +267,7 @@ export default function IssueDetail({
                     return (
                       <li key={child.id}>
                         <Link
-                          href={`/i/${child.key}`}
+                          href={issueLink(child.key)}
                           className="flex h-8 items-center gap-2 rounded-lg px-2 text-[12.5px] hover:bg-surface-sunken"
                         >
                           <IssueTypeIcon type={child.type} size={13} />

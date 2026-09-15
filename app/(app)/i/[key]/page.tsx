@@ -5,6 +5,7 @@ import { requireUser } from "@/lib/auth";
 import { canAccessProject } from "@/lib/permissions";
 import { childSchedule, loadIssueView } from "@/lib/issueView";
 import { todayISO } from "@/lib/date";
+import { listHref, listViewFrom } from "@/lib/views";
 
 export const dynamic = "force-dynamic";
 
@@ -15,13 +16,22 @@ export async function generateMetadata({ params }: PageProps<"/i/[key]">) {
 }
 
 /** A pasted link or a refresh renders the same component full width. */
-export default async function IssuePage({ params }: PageProps<"/i/[key]">) {
+export default async function IssuePage({ params, searchParams }: PageProps<"/i/[key]">) {
   const user = await requireUser();
   const { key } = await params;
+  const query = await searchParams;
 
   const view = loadIssueView(key, todayISO());
   if (!view) notFound();
   if (!canAccessProject(user, view.project.id)) notFound();
+
+  // Only the URL survives a refresh, so `from` is the one thing that still knows which
+  // list this was opened from. A pasted link carries nothing and falls back to the
+  // backlog, which is the one view that holds every issue.
+  const backHref = listHref(listViewFrom(query.from), {
+    project: typeof query.project === "string" ? query.project : view.project.id,
+    root: query.root,
+  });
 
   return (
     <>
@@ -44,7 +54,7 @@ export default async function IssuePage({ params }: PageProps<"/i/[key]">) {
           entry={view.schedule[view.issue.id]}
           childEntries={childSchedule(view)}
           layout="page"
-          backHref={`/backlog?project=${encodeURIComponent(view.project.id)}`}
+          backHref={backHref}
         />
       </div>
     </>

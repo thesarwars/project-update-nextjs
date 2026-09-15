@@ -8,6 +8,7 @@ import IssueTypeIcon from "./IssueTypeIcon";
 import { Button, EmptyState, inputClass } from "@/components/ui";
 import { useToast } from "@/components/Toast";
 import type { TimeBadge } from "@/lib/schedule";
+import { issueHref } from "@/lib/views";
 import {
   ISSUE_TYPES,
   MULTI_SPRINT_TYPES,
@@ -107,10 +108,7 @@ export default function BacklogView({
     }
   };
 
-  const hrefFor = (issue: Issue) => {
-    const next = new URLSearchParams(params);
-    return `/i/${issue.key}?${next}`;
-  };
+  const hrefFor = (issue: Issue) => issueHref(issue.key, "backlog", new URLSearchParams(params));
 
   return (
     <div className="flex flex-col gap-2">

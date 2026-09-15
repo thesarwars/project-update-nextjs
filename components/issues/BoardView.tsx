@@ -11,6 +11,7 @@ import { useToast } from "@/components/Toast";
 import { useDragList, type DropTarget } from "@/lib/useDragList";
 import { rankForDrop } from "@/lib/rank";
 import type { TimeBadge } from "@/lib/schedule";
+import { issueHref } from "@/lib/views";
 import type { Issue, Project, Status } from "@/lib/types";
 
 interface Props {
@@ -138,8 +139,10 @@ export default function BoardView({
 
   const cardAt = (position: Position) => columns[position.column]?.cards[position.index];
 
+  const hrefFor = (issue: Issue) => issueHref(issue.key, "board", new URLSearchParams(params));
+
   /** One way to open a card, shared by click and Enter so the two cannot drift apart. */
-  const open = (issue: Issue) => router.push(`/i/${issue.key}?${params}`);
+  const open = (issue: Issue) => router.push(hrefFor(issue));
 
   /**
    * The keyboard path, shipped with the drag rather than after it.
@@ -296,7 +299,7 @@ export default function BoardView({
                     <div className="flex items-center gap-1.5">
                       <IssueTypeIcon type={issue.type} size={13} />
                       <Link
-                        href={`/i/${issue.key}?${params}`}
+                        href={hrefFor(issue)}
                         className="font-mono text-[11px] text-muted hover:text-foreground"
                       >
                         {issue.key}

@@ -1,5 +1,6 @@
 import IssueDetailPane from "@/components/issues/IssueDetailPane";
 import { requireUser } from "@/lib/auth";
+import { listHref } from "@/lib/views";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +13,8 @@ export default async function InterceptedIssue({ params, searchParams }: PagePro
   const user = await requireUser();
   const { key } = await params;
   const query = await searchParams;
-  const project = typeof query.project === "string" ? `?project=${encodeURIComponent(query.project)}` : "";
 
-  return <IssueDetailPane user={user} issueKey={key} backHref={`/backlog${project}`} />;
+  // The same builder the full page uses, so the pane's close button and a refreshed
+  // page's close button can never disagree about where "back" is.
+  return <IssueDetailPane user={user} issueKey={key} backHref={listHref("backlog", query)} />;
 }

@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/ui";
 import { requireUser } from "@/lib/auth";
 import { issuesAssignedToUser, listStatuses, projectsVisibleTo } from "@/lib/db";
 import { todayISO } from "@/lib/date";
+import { issueHref } from "@/lib/views";
 import type { Status } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -69,7 +70,7 @@ export default async function MyWorkPage() {
                     {rows.map((issue) => (
                       <li key={issue.id}>
                         <Link
-                          href={`/i/${issue.key}`}
+                          href={issueHref(issue.key, "my-work")}
                           className="flex h-9 items-center gap-2 rounded-lg px-2 text-[13px] hover:bg-surface-sunken"
                         >
                           <IssueTypeIcon type={issue.type} />

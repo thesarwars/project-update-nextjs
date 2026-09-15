@@ -12,6 +12,7 @@ import { EmptyState, Key } from "@/components/ui";
 import { useToast } from "@/components/Toast";
 import { EXPANDED_LIMIT, treeCookieName } from "@/lib/tree";
 import type { TimeBadge } from "@/lib/schedule";
+import { issueHref } from "@/lib/views";
 import { PARENT_RULES, ROOT_TYPES, type Issue, type IssueType, type Project, type Status } from "@/lib/types";
 
 interface Props {
@@ -152,7 +153,7 @@ export default function TreeView({
     return out;
   }, [childrenOf, expanded, rootId, byId]);
 
-  const hrefFor = (issue: Issue) => `/i/${issue.key}?${params}`;
+  const hrefFor = (issue: Issue) => issueHref(issue.key, "tree", new URLSearchParams(params));
 
   const create = useCallback(
     async (current: Draft, then: "sibling" | "close") => {
