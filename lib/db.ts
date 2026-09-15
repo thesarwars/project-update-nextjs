@@ -10,6 +10,8 @@ import {
   DEFAULT_HOURS_PER_DAY,
   DEFAULT_LABELS,
   DEFAULT_STATUSES,
+  isBehind,
+  type StatusChange,
   ISSUE_TYPES,
   ISSUE_TYPE_META,
   PARENT_RULES,
@@ -2265,6 +2267,87 @@ export function updateIssue(
   return outcome ?? getIssue(id)!;
 }
 
+/**
+ * Edit an issue, and carry the work under it along when that moves its status.
+ *
+ * Moving a parent by hand and then moving each child by hand is the same intent typed
+ * five times, so a status change takes its descendants with it. Only the ones that are
+ * *behind* the new status move: an epic dragged to In progress pulls its To do children
+ * along and leaves the ones already in review or done exactly where they are. That is
+ * what makes it safe — `updateIssue` stamps `resolved_at` from the new status, so
+ * dragging a finished subtask backwards would erase the day it was finished.
+ *
+ * It follows that a backwards move cascades nothing, which is also what makes undo
+ * work: putting everything back is a set of backwards moves.
+ */
+export function updateIssueCascading(
+  id: string,
+  patch: IssuePatch,
+  expectedVersion?: number,
+): { issue: Issue; moved: StatusChange[] } | IssueError {
+  const outcome = withWrite((tx): IssueError | StatusChange[] => {
+    const row = tx.prepare("SELECT * FROM issues WHERE id = ?").get(id) as unknown as
+      | Row
+      | undefined;
+    if (!row) return "not-found";
+
+    const before = String(row.status_id);
+    const updated = updateIssue(id, patch, expectedVersion);
+    if (typeof updated === "string") return updated;
+    if (patch.statusId === undefined || patch.statusId === before) return [];
+
+    const projectId = String(row.project_id);
+    const targetRow = tx
+      .prepare("SELECT * FROM statuses WHERE id = ? AND project_id = ?")
+      .get(patch.statusId, projectId) as unknown as Row | undefined;
+    if (!targetRow) return "not-found";
+    const target = toStatus(targetRow);
+
+    // One range scan over the indexed path, with each descendant's status alongside it.
+    const prefix = prefixOf({ path: String(row.path), id });
+    const descendants = tx
+      .prepare(
+        `SELECT d.id AS id, d.number AS number, d.status_id AS status_id,
+                s.category AS category, s.sort_order AS sort_order
+           FROM issues d
+           JOIN statuses s ON s.id = d.status_id
+          WHERE d.project_id = ? AND d.archived_at IS NULL
+            AND d.path >= ? AND d.path < ?`,
+      )
+      .all(projectId, prefix, rangeEnd(prefix)) as unknown as Row[];
+
+    const key = projectKeyOf(tx, projectId);
+    const moved: StatusChange[] = [
+      { id, key: `${key}-${Number(row.number)}`, statusId: before },
+    ];
+
+    const resolvedAt = target.isDone ? new Date().toISOString() : null;
+    const write = tx.prepare(
+      `UPDATE issues SET status_id = ?, resolved_at = ?, updated_at = ?, version = version + 1
+        WHERE id = ?`,
+    );
+    for (const d of descendants) {
+      const status = {
+        category: String(d.category) as StatusCategory,
+        sortOrder: Number(d.sort_order),
+      };
+      if (!isBehind(status, target)) continue;
+      // No version check: these are collateral, and the person who dragged the parent is
+      // not looking at a form for each child to conflict with.
+      write.run(target.id, resolvedAt, new Date().toISOString(), String(d.id));
+      moved.push({
+        id: String(d.id),
+        key: `${key}-${Number(d.number)}`,
+        statusId: String(d.status_id),
+      });
+    }
+    return moved;
+  });
+
+  if (typeof outcome === "string") return outcome;
+  return { issue: getIssue(id)!, moved: outcome };
+}
+
 export interface MoveIssue {
   /** Undefined leaves the parent alone; null detaches to the top of the tree. */
   parentId?: string | null;
@@ -2406,13 +2489,19 @@ export function moveIssue(id: string, move: MoveIssue): Issue | IssueError {
 export function moveIssueOnBoard(
   id: string,
   input: { statusId?: string; beforeId?: string | null; afterId?: string | null },
-): Issue | IssueError {
-  return withWrite((tx): Issue | IssueError => {
+): { issue: Issue; moved: StatusChange[] } | IssueError {
+  return withWrite((tx): { issue: Issue; moved: StatusChange[] } | IssueError => {
+    let moved: StatusChange[] = [];
     if (input.statusId) {
-      const updated = updateIssue(id, { statusId: input.statusId });
+      // The same rule as the detail pane's status menu: a drop is a status change, and a
+      // status change carries the work under it.
+      const updated = updateIssueCascading(id, { statusId: input.statusId });
       if (typeof updated === "string") return updated;
+      moved = updated.moved;
     }
-    if (input.beforeId === undefined && input.afterId === undefined) return getIssue(id)!;
+    if (input.beforeId === undefined && input.afterId === undefined) {
+      return { issue: getIssue(id)!, moved };
+    }
 
     const mover = tx.prepare("SELECT project_id, status_id FROM issues WHERE id = ?").get(id) as
       | { project_id: string; status_id: string }
@@ -2440,7 +2529,7 @@ export function moveIssueOnBoard(
       new Date().toISOString(),
       id,
     );
-    return getIssue(id)!;
+    return { issue: getIssue(id)!, moved };
   });
 }
 

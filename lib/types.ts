@@ -191,6 +191,42 @@ export interface Status {
   sortOrder: number;
 }
 
+/** How far along each category is. The only place the three are ranked against each other. */
+export const CATEGORY_ORDER: Record<StatusCategory, number> = {
+  todo: 0,
+  in_progress: 1,
+  done: 2,
+};
+
+/** Ordered by category first, then by the project's own order within it. */
+export function compareStatus(
+  a: Pick<Status, "category" | "sortOrder">,
+  b: Pick<Status, "category" | "sortOrder">,
+): number {
+  const byCategory = CATEGORY_ORDER[a.category] - CATEGORY_ORDER[b.category];
+  return byCategory !== 0 ? byCategory : a.sortOrder - b.sortOrder;
+}
+
+/**
+ * Is `status` short of `target`?
+ *
+ * What decides whether a cascade touches a descendant. Reading the project's own status
+ * order rather than a name means renaming "Done" to "Shipped", or inserting a column, is
+ * still just data — the same reason `isDone` exists.
+ */
+export const isBehind = (
+  status: Pick<Status, "category" | "sortOrder">,
+  target: Pick<Status, "category" | "sortOrder">,
+): boolean => compareStatus(status, target) < 0;
+
+/** Where an issue was before a cascade moved it — what makes undo possible. */
+export interface StatusChange {
+  id: string;
+  key: string;
+  /** The status it had, not the one it was moved to. */
+  statusId: string;
+}
+
 export const PRIORITIES = [1, 2, 3, 4, 5] as const;
 export const PRIORITY_LABELS: Record<number, string> = {
   1: "Highest",

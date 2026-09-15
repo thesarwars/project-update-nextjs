@@ -20,6 +20,7 @@ import {
   type ScheduleEntry,
   type WorkCalendar,
 } from "@/lib/schedule";
+import { cascadeMessage, restoreStatuses, type MoveResult } from "@/lib/statusMove";
 import type { Mention } from "@/lib/db";
 import {
   DEFAULT_LABELS,
@@ -123,7 +124,7 @@ export default function IssueDetail({
   );
 
   const patch = useCallback(
-    async (body: Record<string, unknown>) => {
+    async (body: Record<string, unknown>): Promise<MoveResult | null> => {
       const res = await fetch(`/api/issues/${issue.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -132,12 +133,37 @@ export default function IssueDetail({
       if (!res.ok) {
         const { error } = (await res.json().catch(() => ({}))) as { error?: string };
         toast(error ?? "Could not save that change.");
-        return;
+        return null;
       }
+      const result = (await res.json().catch(() => ({}))) as MoveResult;
       router.refresh();
+      return result;
     },
     [issue.id, router, toast],
   );
+
+  /**
+   * The same edit as dragging the card on the board, so it behaves the same: the work
+   * under this issue that has not reached the new status comes with it.
+   */
+  const changeStatus = async (statusId: string) => {
+    const result = await patch({ statusId });
+    const moved = result?.moved ?? [];
+    const message = cascadeMessage(moved, statuses.find((s) => s.id === statusId)?.name ?? "");
+    if (!message) return;
+    toast({
+      message,
+      action: {
+        label: "Undo",
+        run: () => {
+          void restoreStatuses(moved).then((ok) => {
+            if (!ok) toast("Could not put all of those back.");
+            router.refresh();
+          });
+        },
+      },
+    });
+  };
 
   const addChild = async () => {
     const type = childType ?? legalChildTypes[0];
@@ -363,7 +389,7 @@ export default function IssueDetail({
             <Row label="Status">
               <select
                 value={issue.statusId}
-                onChange={(e) => void patch({ statusId: e.target.value })}
+                onChange={(e) => void changeStatus(e.target.value)}
                 aria-label="Status"
                 className={controlClass}
               >

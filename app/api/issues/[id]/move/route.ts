@@ -35,18 +35,24 @@ export async function POST(request: NextRequest, ctx: RouteContext<"/api/issues/
 
   const statusId = typeof body.statusId === "string" ? body.statusId : undefined;
 
-  const result = statusId
-    ? moveIssueOnBoard(id, {
-        statusId,
-        beforeId: asId(body.beforeId),
-        afterId: asId(body.afterId),
-      })
-    : moveIssue(id, {
-        parentId: "parentId" in body ? asId(body.parentId) : undefined,
-        beforeId: asId(body.beforeId) ?? undefined,
-        afterId: asId(body.afterId) ?? undefined,
-      });
+  if (statusId) {
+    const result = moveIssueOnBoard(id, {
+      statusId,
+      beforeId: asId(body.beforeId),
+      afterId: asId(body.afterId),
+    });
+    if (typeof result === "string") return refusal(result, existing.type);
+    // `moved` is every issue the drop carried along, each with the status it had, so the
+    // board can say what happened and offer to put it back.
+    return json(result);
+  }
+
+  const result = moveIssue(id, {
+    parentId: "parentId" in body ? asId(body.parentId) : undefined,
+    beforeId: asId(body.beforeId) ?? undefined,
+    afterId: asId(body.afterId) ?? undefined,
+  });
 
   if (typeof result === "string") return refusal(result, existing.type);
-  return json({ issue: result });
+  return json({ issue: result, moved: [] });
 }

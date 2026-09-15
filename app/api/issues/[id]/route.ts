@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { badRequest, conflict, forbidden, json, notFound, readJsonBody, requireApiUser } from "@/lib/api";
-import { archiveIssue, getIssue, updateIssue } from "@/lib/db";
+import { archiveIssue, getIssue, updateIssueCascading } from "@/lib/db";
 import { isValidISODate } from "@/lib/date";
 import { MAX_ESTIMATE_HOURS } from "@/lib/schedule";
 import { canAccessProject } from "@/lib/permissions";
@@ -20,7 +20,7 @@ export async function PATCH(request: NextRequest, ctx: RouteContext<"/api/issues
   const body = await readJsonBody<Record<string, unknown>>(request);
   if (!body) return badRequest("Expected a JSON body.");
 
-  const patch: Parameters<typeof updateIssue>[1] = {};
+  const patch: Parameters<typeof updateIssueCascading>[1] = {};
   if (typeof body.title === "string") patch.title = body.title.slice(0, 500);
   if (typeof body.description === "string") patch.description = body.description.slice(0, 20000);
   if (typeof body.statusId === "string") patch.statusId = body.statusId;
@@ -49,7 +49,7 @@ export async function PATCH(request: NextRequest, ctx: RouteContext<"/api/issues
     else return badRequest(`${field} must be a date like 2026-09-15.`);
   }
 
-  const result = updateIssue(
+  const result = updateIssueCascading(
     id,
     patch,
     typeof body.version === "number" ? body.version : undefined,
@@ -62,7 +62,7 @@ export async function PATCH(request: NextRequest, ctx: RouteContext<"/api/issues
     });
   }
   if (typeof result === "string") return refusal(result, existing.type);
-  return json({ issue: result });
+  return json(result);
 }
 
 export async function DELETE(request: NextRequest, ctx: RouteContext<"/api/issues/[id]">) {
