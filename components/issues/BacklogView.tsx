@@ -7,6 +7,7 @@ import IssueRow from "./IssueRow";
 import IssueTypeIcon from "./IssueTypeIcon";
 import { Button, EmptyState, inputClass } from "@/components/ui";
 import { useToast } from "@/components/Toast";
+import type { TimeBadge } from "@/lib/schedule";
 import {
   ISSUE_TYPES,
   MULTI_SPRINT_TYPES,
@@ -23,6 +24,8 @@ interface Props {
   issues: Issue[];
   statuses: Status[];
   rollups: Record<string, { total: number; done: number }>;
+  /** Estimated effort per issue, keyed by id. Issues with no estimate are absent. */
+  times: Record<string, TimeBadge>;
   selectedId: string | null;
   /** Open sprints you can pull work into. */
   sprints: Sprint[];
@@ -35,6 +38,7 @@ export default function BacklogView({
   issues,
   statuses,
   rollups,
+  times,
   selectedId,
   sprints,
   sprintByIssue,
@@ -129,6 +133,7 @@ export default function BacklogView({
                   issue.assigneePersonId ? peopleById.get(issue.assigneePersonId) : undefined
                 }
                 rollup={rollups[issue.id]}
+                time={times[issue.id]}
                 selected={selectedId === issue.id}
                 href={hrefFor(issue)}
               />

@@ -1,6 +1,7 @@
 import IssueDetail from "./IssueDetail";
 import { canAccessProject } from "@/lib/permissions";
-import { loadIssueView } from "@/lib/issueView";
+import { childSchedule, loadIssueView } from "@/lib/issueView";
+import { todayISO } from "@/lib/date";
 import type { User } from "@/lib/types";
 
 /**
@@ -18,7 +19,9 @@ export default function IssueDetailPane({
   issueKey: string;
   backHref: string;
 }) {
-  const view = loadIssueView(issueKey);
+  // A server component, so this clock read happens once and travels down as a prop —
+  // the browser never reads its own, which is what keeps the two sides agreeing.
+  const view = loadIssueView(issueKey, todayISO());
   if (!view || !canAccessProject(user, view.project.id)) return null;
 
   return (
@@ -33,6 +36,9 @@ export default function IssueDetailPane({
         childIssues={view.children}
         statusById={view.statusById}
         mentions={view.mentions}
+        calendar={view.calendar}
+        entry={view.schedule[view.issue.id]}
+        childEntries={childSchedule(view)}
         layout="pane"
         backHref={backHref}
       />

@@ -5,6 +5,7 @@ import IssueTypeIcon, { relationshipLabel } from "./IssueTypeIcon";
 import PriorityIcon from "./PriorityIcon";
 import StatusPill from "./StatusPill";
 import Avatar from "@/components/shell/Avatar";
+import type { TimeBadge } from "@/lib/schedule";
 import type { Issue, IssueType, Person, Status } from "@/lib/types";
 
 interface Props {
@@ -14,6 +15,8 @@ interface Props {
   assignee: Person | undefined;
   /** Descendant progress, for rows that have children. */
   rollup?: { total: number; done: number };
+  /** Estimated effort — the issue's own, or its descendants' added up. */
+  time?: TimeBadge;
   selected: boolean;
   href: string;
 }
@@ -24,6 +27,7 @@ export default function IssueRow({
   parentType,
   assignee,
   rollup,
+  time,
   selected,
   href,
 }: Props) {
@@ -63,6 +67,14 @@ export default function IssueRow({
         {rollup && rollup.total > 0 ? (
           <span className="text-[11px] tabular-nums text-muted">
             {rollup.done}/{rollup.total}
+          </span>
+        ) : null}
+        {time ? (
+          <span
+            title={time.late ? "Projected to finish after its due date" : "Estimated effort"}
+            className={`text-[11px] tabular-nums ${time.late ? "text-danger" : "text-muted"}`}
+          >
+            {time.label}
           </span>
         ) : null}
         <PriorityIcon priority={issue.priority} />

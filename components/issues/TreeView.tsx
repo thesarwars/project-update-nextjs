@@ -11,6 +11,7 @@ import Avatar from "@/components/shell/Avatar";
 import { EmptyState, Key } from "@/components/ui";
 import { useToast } from "@/components/Toast";
 import { EXPANDED_LIMIT, treeCookieName } from "@/lib/tree";
+import type { TimeBadge } from "@/lib/schedule";
 import { PARENT_RULES, ROOT_TYPES, type Issue, type IssueType, type Project, type Status } from "@/lib/types";
 
 interface Props {
@@ -18,6 +19,8 @@ interface Props {
   issues: Issue[];
   statuses: Status[];
   rollups: Record<string, { total: number; done: number }>;
+  /** Estimated effort per issue, keyed by id. Issues with no estimate are absent. */
+  times: Record<string, TimeBadge>;
   rootId: string | null;
   selectedId: string | null;
   /** Read from a cookie on the server, so the first client render matches the HTML. */
@@ -57,6 +60,7 @@ export default function TreeView({
   issues,
   statuses,
   rollups,
+  times,
   rootId,
   selectedId,
   initialExpanded,
@@ -323,6 +327,7 @@ export default function TreeView({
                 : undefined
             }
             rollup={rollups[row.issue.id]}
+            time={times[row.issue.id]}
             href={hrefFor(row.issue)}
             projectId={project.id}
             onToggle={() => toggle(row.issue.id)}
@@ -381,6 +386,7 @@ interface RowProps {
   parentType: IssueType | null;
   assigneeName: string | undefined;
   rollup?: { total: number; done: number };
+  time?: TimeBadge;
   href: string;
   projectId: string;
   onToggle: () => void;
@@ -397,6 +403,7 @@ function TreeRow({
   parentType,
   assigneeName,
   rollup,
+  time,
   href,
   projectId,
   onToggle,
@@ -482,6 +489,14 @@ function TreeRow({
           {rollup && rollup.total > 0 ? (
             <span className="text-[11px] tabular-nums text-muted">
               {rollup.done}/{rollup.total}
+            </span>
+          ) : null}
+          {time ? (
+            <span
+              title={time.late ? "Projected to finish after its due date" : "Estimated effort"}
+              className={`text-[11px] tabular-nums ${time.late ? "text-danger" : "text-muted"}`}
+            >
+              {time.label}
             </span>
           ) : null}
           <PriorityIcon priority={issue.priority} />

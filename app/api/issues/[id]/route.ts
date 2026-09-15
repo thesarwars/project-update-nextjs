@@ -1,6 +1,8 @@
 import type { NextRequest } from "next/server";
 import { badRequest, conflict, forbidden, json, notFound, readJsonBody, requireApiUser } from "@/lib/api";
 import { archiveIssue, getIssue, updateIssue } from "@/lib/db";
+import { isValidISODate } from "@/lib/date";
+import { MAX_ESTIMATE_HOURS } from "@/lib/schedule";
 import { canAccessProject } from "@/lib/permissions";
 import { refusal } from "../route";
 
@@ -29,8 +31,22 @@ export async function PATCH(request: NextRequest, ctx: RouteContext<"/api/issues
         : null;
   }
   if (typeof body.priority === "number") patch.priority = body.priority;
+
+  // Hours. Anything that is not a usable positive number — null, NaN, a negative, a
+  // typo with too many digits — clears the estimate rather than storing a value the
+  // scheduler would have to defend itself against later.
   if (body.estimate !== undefined) {
-    patch.estimate = typeof body.estimate === "number" ? body.estimate : null;
+    const hours = typeof body.estimate === "number" ? body.estimate : NaN;
+    patch.estimate =
+      Number.isFinite(hours) && hours > 0 ? Math.min(hours, MAX_ESTIMATE_HOURS) : null;
+  }
+
+  for (const field of ["startDate", "dueDate"] as const) {
+    const value = body[field];
+    if (value === undefined) continue;
+    if (value === null || value === "") patch[field] = null;
+    else if (isValidISODate(value)) patch[field] = value;
+    else return badRequest(`${field} must be a date like 2026-09-15.`);
   }
 
   const result = updateIssue(

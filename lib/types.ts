@@ -16,6 +16,12 @@ export interface Person {
   active: boolean;
 }
 
+/** Hours in a working day — what turns an estimate in hours into a number of days. */
+export const DEFAULT_HOURS_PER_DAY = 8;
+
+/** Weekday numbers that are worked, 0 = Sunday. Monday to Friday by default. */
+export const DEFAULT_WORKING_DAYS: readonly number[] = [1, 2, 3, 4, 5];
+
 export interface Project {
   id: string;
   name: string;
@@ -24,6 +30,12 @@ export interface Project {
   labels: Record<SectionKey, string>;
   people: Person[];
   createdAt: string;
+  /** The working day an estimate is measured against, so 16h can read as "2d". */
+  hoursPerDay: number;
+  /** Which weekdays work happens on, 0 = Sunday. Never empty. */
+  workingDays: number[];
+  /** Where the projected schedule starts. Null means "from today". */
+  scheduleStart: string | null;
 }
 
 /** Raw editor text per section: one item per line, `- ` prefixed; indented lines continue the item above. */
@@ -203,7 +215,16 @@ export interface Issue {
   assigneePersonId: string | null;
   reporterUserId: string | null;
   priority: number;
+  /**
+   * Effort in hours, always — days are a display built from the project's working day.
+   * Only read on an issue with no children: a parent's estimate is the sum of its
+   * children's, so the typed value is kept but ignored until the children are gone.
+   */
   estimate: number | null;
+  /** Optional pin: nothing in this subtree is scheduled before this date. */
+  startDate: string | null;
+  /** Optional deadline. The projected finish is compared against it, never clamped to it. */
+  dueDate: string | null;
   /** Order among tree siblings only — first children of different parents share keys. */
   rank: string;
   /** Order on the board, one sequence per project. Null only until the backfill on open. */

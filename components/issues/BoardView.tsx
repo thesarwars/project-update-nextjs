@@ -10,6 +10,7 @@ import { EmptyState, Key } from "@/components/ui";
 import { useToast } from "@/components/Toast";
 import { useDragList, type DropTarget } from "@/lib/useDragList";
 import { rankForDrop } from "@/lib/rank";
+import type { TimeBadge } from "@/lib/schedule";
 import type { Issue, Project, Status } from "@/lib/types";
 
 interface Props {
@@ -17,6 +18,8 @@ interface Props {
   issues: Issue[];
   statuses: Status[];
   childCounts: Record<string, number>;
+  /** Estimated effort per issue, keyed by id. Issues with no estimate are absent. */
+  times: Record<string, TimeBadge>;
   selectedId: string | null;
 }
 
@@ -40,7 +43,14 @@ function byBoardOrder(a: Issue, b: Issue): number {
   return a.boardRank < b.boardRank ? -1 : 1;
 }
 
-export default function BoardView({ project, issues, statuses, childCounts, selectedId }: Props) {
+export default function BoardView({
+  project,
+  issues,
+  statuses,
+  childCounts,
+  times,
+  selectedId,
+}: Props) {
   const router = useRouter();
   const params = useSearchParams();
   const toast = useToast();
@@ -303,6 +313,20 @@ export default function BoardView({ project, issues, statuses, childCounts, sele
                           title={`${childCounts[issue.id]} child issues`}
                         >
                           ⌂{childCounts[issue.id]}
+                        </span>
+                      ) : null}
+                      {times[issue.id] ? (
+                        <span
+                          className={`text-[10.5px] tabular-nums ${
+                            times[issue.id].late ? "text-danger" : "text-muted"
+                          }`}
+                          title={
+                            times[issue.id].late
+                              ? "Projected to finish after its due date"
+                              : "Estimated effort"
+                          }
+                        >
+                          {times[issue.id].label}
                         </span>
                       ) : null}
                       <span className="ml-auto">

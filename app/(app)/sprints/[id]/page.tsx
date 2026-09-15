@@ -3,7 +3,10 @@ import { notFound } from "next/navigation";
 import SprintDetail, { type ScopeRow } from "@/components/issues/SprintDetail";
 import ViewToolbar from "@/components/shell/ViewToolbar";
 import { requireUser } from "@/lib/auth";
+import { todayISO } from "@/lib/date";
+import { planProject, workdaysBetween } from "@/lib/schedule";
 import {
+  getProject,
   getSprint,
   listIssues,
   listStatuses,
@@ -30,6 +33,9 @@ export default async function SprintPage({ params }: PageProps<"/sprints/[id]">)
   const sprint = getSprint(id);
   if (!sprint) notFound();
   if (!canAccessProject(user, sprint.projectId)) notFound();
+
+  const project = getProject(sprint.projectId);
+  if (!project) notFound();
 
   const issues = listIssues(sprint.projectId);
   const scope = new Set(sprintScopeIds(id));
@@ -65,6 +71,24 @@ export default async function SprintPage({ params }: PageProps<"/sprints/[id]">)
   };
   for (const root of roots.sort((a, b) => (a.rank < b.rank ? -1 : 1))) walk(root, 0);
 
+  /**
+   * How much work this sprint is holding.
+   *
+   * Only issues that are leaves of the project tree carry a number of their own — a
+   * parent's estimate is its children's added up — so summing the in-scope leaves counts
+   * every piece of work exactly once, and leaves the ghost rows out, which is the same
+   * rule the counters above follow.
+   */
+  const { calendar, schedule } = planProject(project, issues, todayISO());
+  const parentIds = new Set(issues.map((i) => i.parentId).filter(Boolean));
+  const estimateHours = inScope
+    .filter((i) => !parentIds.has(i.id))
+    .reduce((total, i) => total + (schedule[i.id]?.hours ?? 0), 0);
+  const sprintWorkdays =
+    sprint.startDate && sprint.endDate
+      ? workdaysBetween(sprint.startDate, sprint.endDate, calendar)
+      : null;
+
   const statusById: Record<string, Status> = {};
   for (const status of listStatuses(sprint.projectId)) statusById[status.id] = status;
 
@@ -83,6 +107,9 @@ export default async function SprintPage({ params }: PageProps<"/sprints/[id]">)
           counts={sprintCounts(id)}
           progress={sprintEpicProgress(id)}
           statusById={statusById}
+          estimateHours={estimateHours}
+          sprintWorkdays={sprintWorkdays}
+          calendar={calendar}
           canManage={canManageProject(user)}
         />
       </div>

@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { rankBetween, rankForDrop } from "./rank";
 import { endOfSprint, type DurationUnit } from "./date";
+import { clampHoursPerDay, cleanWorkingDays } from "./schedule";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { serverLog } from "./serverLog";
 import {
+  DEFAULT_HOURS_PER_DAY,
   DEFAULT_LABELS,
   DEFAULT_STATUSES,
   ISSUE_TYPES,
@@ -365,6 +367,17 @@ const EXTRA_COLUMNS: { table: string; column: string; ddl: string }[] = [
   { table: "issues", column: "board_rank", ddl: "TEXT" },
   { table: "projects", column: "key", ddl: "TEXT" },
   { table: "projects", column: "next_issue_number", ddl: "INTEGER NOT NULL DEFAULT 1" },
+  // Working time. The defaults are the ones in lib/types.ts, repeated here because a
+  // column default has to be a literal — keep the two in step.
+  { table: "projects", column: "hours_per_day", ddl: "REAL NOT NULL DEFAULT 8" },
+  { table: "projects", column: "working_days", ddl: "TEXT NOT NULL DEFAULT '1,2,3,4,5'" },
+  // Where the projected schedule opens. NULL means "from today", so a project nobody has
+  // configured still plans, it just plans from now.
+  { table: "projects", column: "schedule_start", ddl: "TEXT" },
+  // A pin, not a plan: the scheduler jumps the queue forward to this date and never back.
+  { table: "issues", column: "start_date", ddl: "TEXT" },
+  // The deadline someone committed to, which the projection is measured against.
+  { table: "issues", column: "due_date", ddl: "TEXT" },
 ];
 
 function addMissingColumns(db: DatabaseSync): void {
@@ -392,7 +405,7 @@ function addMissingColumns(db: DatabaseSync): void {
 
   for (const { table, column, ddl } of EXTRA_COLUMNS) {
     // SQLite allows ADD COLUMN with a REFERENCES clause only when it defaults to NULL,
-    // which every entry here does.
+    // which every entry carrying one does.
     if (!columnsOf(table).has(column)) {
       db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
     }
@@ -960,6 +973,9 @@ function toProject(r: Row, people: Person[]): Project {
     createdAt: String(r.created_at ?? ""),
     labels,
     people,
+    hoursPerDay: clampHoursPerDay(Number(r.hours_per_day ?? DEFAULT_HOURS_PER_DAY)),
+    workingDays: cleanWorkingDays(String(r.working_days ?? "").split(",").map(Number)),
+    scheduleStart: r.schedule_start == null ? null : String(r.schedule_start),
   };
 }
 
@@ -1053,6 +1069,10 @@ export interface ProjectPatch {
   titleTemplate?: string;
   labels?: Partial<Record<SectionKey, string>>;
   people?: { id?: string; name: string; active: boolean }[];
+  hoursPerDay?: number;
+  workingDays?: number[];
+  /** Null puts the schedule back on "from today". */
+  scheduleStart?: string | null;
 }
 
 export function updateProject(id: string, patch: ProjectPatch): Project | null {
@@ -1060,7 +1080,7 @@ export function updateProject(id: string, patch: ProjectPatch): Project | null {
 
   withWrite((db) => {
     const sets: string[] = [];
-    const values: string[] = [];
+    const values: (string | number | null)[] = [];
     if (patch.name !== undefined) {
       sets.push("name = ?");
       values.push(patch.name);
@@ -1068,6 +1088,20 @@ export function updateProject(id: string, patch: ProjectPatch): Project | null {
     if (patch.titleTemplate !== undefined) {
       sets.push("title_template = ?");
       values.push(patch.titleTemplate);
+    }
+    // Clamped on the way in as well as on the way out: a zero-hour day or a week with no
+    // working days in it would make the scheduler's day-walk meaningless.
+    if (patch.hoursPerDay !== undefined) {
+      sets.push("hours_per_day = ?");
+      values.push(clampHoursPerDay(patch.hoursPerDay));
+    }
+    if (patch.workingDays !== undefined) {
+      sets.push("working_days = ?");
+      values.push(cleanWorkingDays(patch.workingDays).join(","));
+    }
+    if (patch.scheduleStart !== undefined) {
+      sets.push("schedule_start = ?");
+      values.push(patch.scheduleStart);
     }
     for (const key of SECTION_KEYS) {
       const label = patch.labels?.[key];
@@ -1910,6 +1944,8 @@ function toIssue(r: Row, projectKey: string): Issue {
     reporterUserId: r.reporter_user_id == null ? null : String(r.reporter_user_id),
     priority: Number(r.priority),
     estimate: r.estimate == null ? null : Number(r.estimate),
+    startDate: r.start_date == null ? null : String(r.start_date),
+    dueDate: r.due_date == null ? null : String(r.due_date),
     rank: String(r.rank),
     boardRank: r.board_rank == null ? null : String(r.board_rank),
     path: String(r.path),
@@ -2164,7 +2200,10 @@ export interface IssuePatch {
   statusId?: string;
   assigneePersonId?: string | null;
   priority?: number;
+  /** Hours. Null clears it, which puts the issue back to "not estimated". */
   estimate?: number | null;
+  startDate?: string | null;
+  dueDate?: string | null;
 }
 
 /**
@@ -2198,6 +2237,8 @@ export function updateIssue(
     if (patch.assigneePersonId !== undefined) set("assignee_person_id", patch.assigneePersonId);
     if (patch.priority !== undefined) set("priority", patch.priority);
     if (patch.estimate !== undefined) set("estimate", patch.estimate);
+    if (patch.startDate !== undefined) set("start_date", patch.startDate);
+    if (patch.dueDate !== undefined) set("due_date", patch.dueDate);
 
     if (patch.statusId !== undefined) {
       const status = tx

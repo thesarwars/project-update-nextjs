@@ -1,6 +1,8 @@
 import BacklogView from "@/components/issues/BacklogView";
 import { EmptyState } from "@/components/ui";
 import { requireUser } from "@/lib/auth";
+import { todayISO } from "@/lib/date";
+import { planProject } from "@/lib/schedule";
 import {
   getSetting,
   listIssues,
@@ -33,6 +35,9 @@ export default async function BacklogPage({ searchParams }: PageProps<"/backlog"
   }
 
   const issues = orderDepthFirst(listIssues(project.id));
+  // An unanchored project plans from today, and today is read here rather than in the
+  // scheduler so the server and the browser cannot disagree about which day it is.
+  const { times } = planProject(project, issues, todayISO());
   const inSprint = sprintByIssue(project.id);
   const sprintIds: Record<string, string> = {};
   for (const [issueId, sprint] of Object.entries(inSprint)) sprintIds[issueId] = sprint.id;
@@ -43,6 +48,7 @@ export default async function BacklogPage({ searchParams }: PageProps<"/backlog"
       issues={issues}
       statuses={listStatuses(project.id)}
       rollups={rollupByRoot(project.id)}
+      times={times}
       selectedId={null}
       sprints={listSprints(project.id).filter((s) => s.state !== "closed")}
       sprintByIssue={sprintIds}

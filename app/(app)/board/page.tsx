@@ -1,6 +1,8 @@
 import BoardView from "@/components/issues/BoardView";
 import { EmptyState } from "@/components/ui";
 import { requireUser } from "@/lib/auth";
+import { todayISO } from "@/lib/date";
+import { planProject } from "@/lib/schedule";
 import { getSetting, listIssues, listStatuses, projectsVisibleTo } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +39,7 @@ export default async function BoardPage({ searchParams }: PageProps<"/board">) {
       issues={issues}
       statuses={listStatuses(project.id)}
       childCounts={childCounts}
+      times={planProject(project, issues, todayISO()).times}
       selectedId={null}
     />
   );

@@ -9,6 +9,7 @@ import SprintCounters from "./SprintCounters";
 import { IconButton } from "@/components/ui";
 import { useToast } from "@/components/Toast";
 import { formatDisplayDate } from "@/lib/date";
+import { formatDuration, type WorkCalendar } from "@/lib/schedule";
 import type { Issue, Sprint, SprintCount, SprintEpicProgress, Status } from "@/lib/types";
 
 export interface ScopeRow {
@@ -26,6 +27,11 @@ interface Props {
   counts: SprintCount[];
   progress: SprintEpicProgress[];
   statusById: Record<string, Status>;
+  /** Estimated hours in scope, counting each piece of work once. */
+  estimateHours: number;
+  /** Working days between the sprint's dates, or null when it has none yet. */
+  sprintWorkdays: number | null;
+  calendar: WorkCalendar;
   canManage: boolean;
 }
 
@@ -35,11 +41,19 @@ export default function SprintDetail({
   counts,
   progress,
   statusById,
+  estimateHours,
+  sprintWorkdays,
+  calendar,
   canManage,
 }: Props) {
   const router = useRouter();
   const toast = useToast();
   const progressById = new Map(progress.map((p) => [p.issueId, p]));
+
+  // Capacity is the honest comparison: hours of work against hours the sprint actually
+  // has, rather than a count of issues, which says nothing about how big they are.
+  const capacityHours = sprintWorkdays === null ? null : sprintWorkdays * calendar.hoursPerDay;
+  const overCommitted = capacityHours !== null && estimateHours > capacityHours;
 
   const remove = async (issueId: string) => {
     const res = await fetch(`/api/sprints/${sprint.id}/scope?issueId=${issueId}`, {
@@ -64,6 +78,16 @@ export default function SprintDetail({
           </span>
           {sprint.goal ? <span className="text-[12.5px] text-muted">· {sprint.goal}</span> : null}
         </div>
+
+        {estimateHours > 0 ? (
+          <p className={`mb-3 text-[12.5px] ${overCommitted ? "text-danger" : "text-muted"}`}>
+            {formatDuration(estimateHours, calendar)} estimated
+            {sprintWorkdays === null
+              ? " · no dates, so there is nothing to compare it against"
+              : ` · ${sprintWorkdays} working ${sprintWorkdays === 1 ? "day" : "days"} in this sprint`}
+            {overCommitted ? " · more than it has room for" : ""}
+          </p>
+        ) : null}
         <SprintCounters counts={counts} variant="full" />
       </section>
 

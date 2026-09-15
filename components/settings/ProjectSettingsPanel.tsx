@@ -14,6 +14,9 @@ import {
   type SectionKey,
 } from "@/lib/types";
 
+/** Index is the weekday number the scheduler uses, 0 = Sunday. */
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 export default function ProjectSettingsPanel({ project }: { project: Project | undefined }) {
   return (
     <div className="flex max-w-2xl flex-col gap-8">
@@ -29,10 +32,24 @@ function ProjectForm({ project }: { project: Project }) {
   const [name, setName] = useState(project.name);
   const [titleTemplate, setTitleTemplate] = useState(project.titleTemplate);
   const [labels, setLabels] = useState<Record<SectionKey, string>>(project.labels);
+  const [hoursPerDay, setHoursPerDay] = useState(String(project.hoursPerDay));
+  const [workingDays, setWorkingDays] = useState<number[]>(project.workingDays);
+  const [scheduleStart, setScheduleStart] = useState(project.scheduleStart ?? "");
   const [busy, setBusy] = useState(false);
 
   const save = async () => {
     if (!name.trim()) return;
+
+    const hours = Number(hoursPerDay);
+    if (!Number.isFinite(hours) || hours < 0.5 || hours > 24) {
+      toast("A working day is between 0.5 and 24 hours.");
+      return;
+    }
+    if (!workingDays.length) {
+      toast("Pick at least one working day, or nothing can be scheduled.");
+      return;
+    }
+
     setBusy(true);
     try {
       const cleaned = {} as Record<SectionKey, string>;
@@ -40,7 +57,14 @@ function ProjectForm({ project }: { project: Project }) {
       const res = await fetch(`/api/projects/${project.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), titleTemplate, labels: cleaned }),
+        body: JSON.stringify({
+          name: name.trim(),
+          titleTemplate,
+          labels: cleaned,
+          hoursPerDay: hours,
+          workingDays,
+          scheduleStart: scheduleStart || null,
+        }),
       });
       if (!res.ok) throw new Error(String(res.status));
       router.refresh();
@@ -108,6 +132,60 @@ function ProjectForm({ project }: { project: Project }) {
               />
             </label>
           ))}
+        </div>
+      </fieldset>
+
+      <fieldset className="flex flex-col gap-3">
+        <legend className="mb-1 text-xs font-medium text-muted">
+          Working time — what a day means when an estimate is added up, and which days work
+          happens on
+        </legend>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Hours in a working day" hint="At 8, a 16h task reads as 2 days.">
+            <input
+              type="number"
+              min={0.5}
+              max={24}
+              step={0.5}
+              value={hoursPerDay}
+              onChange={(e) => setHoursPerDay(e.target.value)}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Schedule starts" hint="Leave this empty to plan from today.">
+            <input
+              type="date"
+              value={scheduleStart}
+              onChange={(e) => setScheduleStart(e.target.value)}
+              className={inputClass}
+            />
+          </Field>
+        </div>
+
+        <div className="flex flex-wrap gap-1.5">
+          {WEEKDAYS.map((label, day) => {
+            const on = workingDays.includes(day);
+            return (
+              <button
+                key={label}
+                type="button"
+                aria-pressed={on}
+                onClick={() =>
+                  setWorkingDays((days) =>
+                    on ? days.filter((d) => d !== day) : [...days, day].sort((a, b) => a - b),
+                  )
+                }
+                className={`h-8 w-12 rounded-lg border text-[12px] transition ${
+                  on
+                    ? "border-accent bg-accent/10 text-foreground"
+                    : "border-line text-muted hover:border-line-strong"
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
         </div>
       </fieldset>
 

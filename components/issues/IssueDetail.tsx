@@ -14,6 +14,12 @@ import { useToast } from "@/components/Toast";
 import { useReportSave } from "@/components/shell/SaveProvider";
 import { useDebouncedSave } from "@/lib/useDebouncedSave";
 import { formatDisplayDate } from "@/lib/date";
+import {
+  formatDuration,
+  parseDuration,
+  type ScheduleEntry,
+  type WorkCalendar,
+} from "@/lib/schedule";
 import type { Mention } from "@/lib/db";
 import {
   DEFAULT_LABELS,
@@ -36,10 +42,20 @@ interface Props {
   childIssues: Issue[];
   statusById: Record<string, Status>;
   mentions: Mention[];
+  /** The project's working day, so "2d" means the same here as everywhere else. */
+  calendar: WorkCalendar;
+  /** This issue's own projection. Undefined only for an issue the scheduler never saw. */
+  entry: ScheduleEntry | undefined;
+  /** The children's projections, keyed by issue id, for the badges in the list below. */
+  childEntries: Record<string, ScheduleEntry>;
   /** "pane" sits beside the list; "page" is the full-width form after a refresh. */
   layout: "pane" | "page";
   backHref: string;
 }
+
+/** The sidebar's controls, which are a size down from the `inputClass` used in forms. */
+const controlClass =
+  "h-8 w-full rounded-lg border border-line bg-surface px-2 text-[12.5px] outline-none focus:border-accent";
 
 interface TextSave {
   id: string;
@@ -72,6 +88,9 @@ export default function IssueDetail({
   childIssues,
   statusById,
   mentions,
+  calendar,
+  entry,
+  childEntries,
   layout,
   backHref,
 }: Props) {
@@ -83,6 +102,9 @@ export default function IssueDetail({
   const [description, setDescription] = useState(issue.description);
   const [childTitle, setChildTitle] = useState("");
   const [childType, setChildType] = useState<IssueType | null>(null);
+  const [estimate, setEstimate] = useState(
+    issue.estimate ? formatDuration(issue.estimate, calendar) : "",
+  );
 
   const { queue, state } = useDebouncedSave<TextSave>({ save: saveText });
   useEffect(() => reportSave(state), [state, reportSave]);
@@ -130,6 +152,29 @@ export default function IssueDetail({
     router.refresh();
   };
 
+  /**
+   * Estimates are typed rather than picked: "1d 4h" is one gesture where a number and a
+   * unit dropdown are three. The text is parsed against the project's working day, so the
+   * same string means the same thing here as in Settings, and anything unparseable is
+   * refused and reverted — an estimate that quietly saves half of what was typed is worse
+   * than one that refuses.
+   */
+  const commitEstimate = async () => {
+    const typed = estimate.trim();
+    const hours = typed ? parseDuration(typed, calendar) : 0;
+    if (hours === null) {
+      toast("Try 4h, 2d or 1d 4h.");
+      setEstimate(issue.estimate ? formatDuration(issue.estimate, calendar) : "");
+      return;
+    }
+    // Echo back the canonical spelling, so "8h" settles as "1d" on an eight-hour day.
+    setEstimate(hours > 0 ? formatDuration(hours, calendar) : "");
+    if ((issue.estimate ?? 0) === hours) return;
+    await patch({ estimate: hours > 0 ? hours : null });
+  };
+
+  /** A parent's estimate is the sum of its children's, so its own field is not editable. */
+  const rolledUp = childIssues.length > 0;
   const wide = layout === "page";
 
   return (
@@ -209,6 +254,7 @@ export default function IssueDetail({
                 <ul className="flex flex-col">
                   {childIssues.map((child) => {
                     const rel = relationshipLabel(issue.type, child.type);
+                    const time = childEntries[child.id];
                     return (
                       <li key={child.id}>
                         <Link
@@ -223,7 +269,14 @@ export default function IssueDetail({
                               ↳ {rel}
                             </span>
                           ) : null}
-                          <span className="ml-auto shrink-0">
+                          <span className="ml-auto flex shrink-0 items-center gap-2">
+                            {time && time.hours > 0 ? (
+                              <span
+                                className={`text-[11px] tabular-nums ${time.late ? "text-danger" : "text-muted"}`}
+                              >
+                                {formatDuration(time.hours, calendar)}
+                              </span>
+                            ) : null}
                             {statusById[child.statusId] ? (
                               <StatusPill status={statusById[child.statusId]} />
                             ) : null}
@@ -295,7 +348,7 @@ export default function IssueDetail({
                 value={issue.statusId}
                 onChange={(e) => void patch({ statusId: e.target.value })}
                 aria-label="Status"
-                className="h-8 w-full rounded-lg border border-line bg-surface px-2 text-[12.5px] outline-none focus:border-accent"
+                className={controlClass}
               >
                 {statuses.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -310,7 +363,7 @@ export default function IssueDetail({
                 value={issue.assigneePersonId ?? ""}
                 onChange={(e) => void patch({ assigneePersonId: e.target.value || null })}
                 aria-label="Assignee"
-                className="h-8 w-full rounded-lg border border-line bg-surface px-2 text-[12.5px] outline-none focus:border-accent"
+                className={controlClass}
               >
                 <option value="">Unassigned</option>
                 {people.map((p) => (
@@ -326,7 +379,7 @@ export default function IssueDetail({
                 value={issue.priority}
                 onChange={(e) => void patch({ priority: Number(e.target.value) })}
                 aria-label="Priority"
-                className="h-8 w-full rounded-lg border border-line bg-surface px-2 text-[12.5px] outline-none focus:border-accent"
+                className={controlClass}
               >
                 {PRIORITIES.map((p) => (
                   <option key={p} value={p}>
@@ -335,6 +388,76 @@ export default function IssueDetail({
                 ))}
               </select>
             </Row>
+
+            <section className="flex flex-col gap-3 border-t border-line pt-3">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+                Timeline
+              </span>
+
+              <Row label="Estimate">
+                {rolledUp ? (
+                  <output className={`${controlClass} flex items-center text-muted`}>
+                    {entry && entry.hours > 0 ? formatDuration(entry.hours, calendar) : "—"}
+                  </output>
+                ) : (
+                  <input
+                    value={estimate}
+                    onChange={(e) => setEstimate(e.target.value)}
+                    onBlur={() => void commitEstimate()}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    placeholder="4h, 2d, 1d 4h"
+                    aria-label="Estimate"
+                    className={controlClass}
+                  />
+                )}
+              </Row>
+
+              {rolledUp ? (
+                <p className="-mt-2 text-[11px] text-muted">
+                  Added up from {childIssues.length}{" "}
+                  {childIssues.length === 1 ? "child" : "children"}
+                  {entry?.unestimated ? ` · ${entry.unestimated} not estimated` : ""}
+                </p>
+              ) : null}
+
+              <Row label="Start no earlier than">
+                <input
+                  type="date"
+                  value={issue.startDate ?? ""}
+                  onChange={(e) => void patch({ startDate: e.target.value || null })}
+                  aria-label="Start no earlier than"
+                  className={controlClass}
+                />
+              </Row>
+
+              <Row label="Due">
+                <input
+                  type="date"
+                  value={issue.dueDate ?? ""}
+                  onChange={(e) => void patch({ dueDate: e.target.value || null })}
+                  aria-label="Due"
+                  className={controlClass}
+                />
+              </Row>
+
+              {entry?.start && entry.end ? (
+                <p className={`text-[11.5px] ${entry.late ? "text-danger" : "text-muted"}`}>
+                  {formatDisplayDate(entry.start)} → {formatDisplayDate(entry.end)}
+                  {entry.late && issue.dueDate ? ` · past ${formatDisplayDate(issue.dueDate)}` : ""}
+                </p>
+              ) : (
+                <p className="text-[11.5px] text-muted">
+                  {rolledUp
+                    ? "Estimate something under this to place it on the calendar."
+                    : "Add an estimate to place this on the calendar."}
+                </p>
+              )}
+            </section>
 
             <div className="flex items-center gap-2 px-0.5 pt-1">
               {status ? <StatusPill status={status} /> : null}

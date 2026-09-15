@@ -3,13 +3,14 @@ import IssueDetail from "@/components/issues/IssueDetail";
 import ViewToolbar from "@/components/shell/ViewToolbar";
 import { requireUser } from "@/lib/auth";
 import { canAccessProject } from "@/lib/permissions";
-import { loadIssueView } from "@/lib/issueView";
+import { childSchedule, loadIssueView } from "@/lib/issueView";
+import { todayISO } from "@/lib/date";
 
 export const dynamic = "force-dynamic";
 
 export async function generateMetadata({ params }: PageProps<"/i/[key]">) {
   const { key } = await params;
-  const view = loadIssueView(key);
+  const view = loadIssueView(key, todayISO());
   return { title: view ? `${view.issue.key} · ${view.issue.title}` : "Issue" };
 }
 
@@ -18,7 +19,7 @@ export default async function IssuePage({ params }: PageProps<"/i/[key]">) {
   const user = await requireUser();
   const { key } = await params;
 
-  const view = loadIssueView(key);
+  const view = loadIssueView(key, todayISO());
   if (!view) notFound();
   if (!canAccessProject(user, view.project.id)) notFound();
 
@@ -39,6 +40,9 @@ export default async function IssuePage({ params }: PageProps<"/i/[key]">) {
           childIssues={view.children}
           statusById={view.statusById}
           mentions={view.mentions}
+          calendar={view.calendar}
+          entry={view.schedule[view.issue.id]}
+          childEntries={childSchedule(view)}
           layout="page"
           backHref={`/backlog?project=${encodeURIComponent(view.project.id)}`}
         />

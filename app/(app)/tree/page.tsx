@@ -3,6 +3,8 @@ import TreeView from "@/components/issues/TreeView";
 import { treeCookieName } from "@/lib/tree";
 import { EmptyState } from "@/components/ui";
 import { requireUser } from "@/lib/auth";
+import { todayISO } from "@/lib/date";
+import { planProject } from "@/lib/schedule";
 import { getSetting, listIssues, listStatuses, projectsVisibleTo, rollupByRoot } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -42,6 +44,7 @@ export default async function TreePage({ searchParams }: PageProps<"/tree">) {
       issues={issues}
       statuses={listStatuses(project.id)}
       rollups={rollupByRoot(project.id)}
+      times={planProject(project, issues, todayISO()).times}
       rootId={rootId}
       selectedId={null}
       initialExpanded={[...expanded]}
