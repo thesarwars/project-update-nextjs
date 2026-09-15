@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rankBetween } from "./rank";
+import { rankBetween, rankForDrop } from "./rank";
 import { endOfSprint, type DurationUnit } from "./date";
 import fs from "node:fs";
 import path from "node:path";
@@ -359,6 +359,10 @@ const EXTRA_COLUMNS: { table: string; column: string; ddl: string }[] = [
   // When the address was proven, by clicking through a code we mailed to it. NULL means
   // the account is not usable yet, which is what stops someone signing up as a colleague.
   { table: "users", column: "email_verified_at", ddl: "TEXT" },
+  // Order within a board column, kept apart from rank, which orders an issue among its
+  // tree siblings. Every parent's first child starts at the same rank, so a board sorted
+  // by it ties across parents — and a drop written into it reorders the tree as well.
+  { table: "issues", column: "board_rank", ddl: "TEXT" },
   { table: "projects", column: "key", ddl: "TEXT" },
   { table: "projects", column: "next_issue_number", ddl: "INTEGER NOT NULL DEFAULT 1" },
 ];
@@ -612,6 +616,51 @@ function backfillProjectTrackerDefaults(db: DatabaseSync): void {
   for (const project of pending) ensureProjectTrackerDefaults(db, project.id, project.name);
 }
 
+/**
+ * Any issue without a board position gets one, after everything that has one, in the
+ * order the issues were created.
+ *
+ * Runs on open and is idempotent, like the tracker defaults above: it covers the issues
+ * that predate board_rank, and anything written by a checkout that did not know about it.
+ * One transaction, because in DELETE journal mode each statement outside one is its own
+ * fsync, and a project with thousands of issues would take seconds to open.
+ */
+function backfillBoardRanks(db: DatabaseSync): void {
+  const projects = db
+    .prepare("SELECT DISTINCT project_id FROM issues WHERE board_rank IS NULL")
+    .all() as unknown as { project_id: string }[];
+  if (!projects.length) return;
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const top = db.prepare(
+      `SELECT board_rank FROM issues
+        WHERE project_id = ? AND board_rank IS NOT NULL
+        ORDER BY board_rank DESC LIMIT 1`,
+    );
+    const pending = db.prepare(
+      "SELECT id FROM issues WHERE project_id = ? AND board_rank IS NULL ORDER BY number",
+    );
+    const write = db.prepare("UPDATE issues SET board_rank = ? WHERE id = ?");
+
+    for (const { project_id: projectId } of projects) {
+      let previous = (top.get(projectId) as { board_rank: string } | undefined)?.board_rank ?? null;
+      for (const { id } of pending.all(projectId) as unknown as { id: string }[]) {
+        previous = rankBetween(previous, null);
+        write.run(previous, id);
+      }
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* already rolled back */
+    }
+    throw err;
+  }
+}
+
 /** A project needs a key and a status set before it can hold an issue. Idempotent. */
 export function ensureProjectTrackerDefaults(
   db: DatabaseSync,
@@ -766,6 +815,11 @@ function open(): DatabaseSync {
       if (!globalRef.__standupDb) return open();
       try {
         addMissingColumns(cached);
+        // A hot reload can add a column to a database that is already open, but the
+        // backfills that give it values used to run only on a cold open. board_rank
+        // arrived exactly that way on a live dev server: the column appeared, every value
+        // stayed NULL, and the first drop ranked one card against nothing.
+        backfillBoardRanks(cached);
       } catch (err) {
         throw describeOpenFailure(err);
       }
@@ -804,6 +858,7 @@ function bootstrap(): DatabaseSync {
   seedIssueReferenceData(db);
   seedIfEmpty(db);
   backfillProjectTrackerDefaults(db);
+  backfillBoardRanks(db);
   registerShutdown(db);
 
   // Which file is in use is the first thing anyone needs when the data looks wrong, and
@@ -1856,6 +1911,7 @@ function toIssue(r: Row, projectKey: string): Issue {
     priority: Number(r.priority),
     estimate: r.estimate == null ? null : Number(r.estimate),
     rank: String(r.rank),
+    boardRank: r.board_rank == null ? null : String(r.board_rank),
     path: String(r.path),
     depth: Number(r.depth),
     rootId: String(r.root_id),
@@ -1995,6 +2051,16 @@ export function createIssue(input: NewIssue): Issue | IssueError {
       | { rank: string }
       | undefined;
 
+    // New issues join the bottom of the board, across the whole project, so a card never
+    // appears between two that were already there.
+    const lastOnBoard = tx
+      .prepare(
+        `SELECT board_rank FROM issues
+          WHERE project_id = ? AND board_rank IS NOT NULL
+          ORDER BY board_rank DESC LIMIT 1`,
+      )
+      .get(input.projectId) as { board_rank: string } | undefined;
+
     const path = parent ? prefixOf({ path: String(parent.path), id: String(parent.id) }) : "/";
     const depth = parent ? Number(parent.depth) + 1 : 0;
     const rootId = parent ? String(parent.root_id) : id;
@@ -2002,9 +2068,9 @@ export function createIssue(input: NewIssue): Issue | IssueError {
 
     tx.prepare(
       `INSERT INTO issues (id, project_id, number, type, parent_id, status_id, title, description,
-                           assignee_person_id, reporter_user_id, priority, rank, path, depth, root_id,
-                           created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                           assignee_person_id, reporter_user_id, priority, rank, board_rank, path,
+                           depth, root_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       input.projectId,
@@ -2018,6 +2084,7 @@ export function createIssue(input: NewIssue): Issue | IssueError {
       input.reporterUserId ?? null,
       input.priority ?? 3,
       rankBetween(last?.rank ?? null, null),
+      rankBetween(lastOnBoard?.board_rank ?? null, null),
       path,
       depth,
       rootId,
@@ -2283,21 +2350,55 @@ export function moveIssue(id: string, move: MoveIssue): Issue | IssueError {
  * the wrong place if the second one failed. `withWrite` nests through SAVEPOINT, so both
  * inner calls join this transaction rather than opening their own.
  */
+/**
+ * Change an issue's column and its place in the column — and nothing about the tree.
+ *
+ * The board used to borrow the tree's order (rank), which orders an issue only among
+ * its own siblings. Every parent's first child starts at the same key, so cards from
+ * different parents tied; a drop in front of one could compute a key equal to three
+ * others and land anywhere among them; and every board drag quietly reordered the tree.
+ * board_rank is one order per project, so a column is always a strict sequence.
+ *
+ * With neither neighbour given the position is left alone, so a status-only move from
+ * elsewhere does not shuffle the board. A null beforeId means "the end of the column".
+ */
 export function moveIssueOnBoard(
   id: string,
   input: { statusId?: string; beforeId?: string | null; afterId?: string | null },
 ): Issue | IssueError {
-  return withWrite((): Issue | IssueError => {
+  return withWrite((tx): Issue | IssueError => {
     if (input.statusId) {
       const updated = updateIssue(id, { statusId: input.statusId });
       if (typeof updated === "string") return updated;
     }
-    if (input.beforeId !== undefined || input.afterId !== undefined) {
-      return moveIssue(id, {
-        beforeId: input.beforeId ?? undefined,
-        afterId: input.afterId ?? undefined,
-      });
+    if (input.beforeId === undefined && input.afterId === undefined) return getIssue(id)!;
+
+    const mover = tx.prepare("SELECT project_id, status_id FROM issues WHERE id = ?").get(id) as
+      | { project_id: string; status_id: string }
+      | undefined;
+    if (!mover) return "not-found";
+
+    const column = (
+      tx
+        .prepare(
+          `SELECT id, board_rank AS rank FROM issues
+            WHERE project_id = ? AND status_id = ? AND id <> ? AND board_rank IS NOT NULL
+            ORDER BY board_rank`,
+        )
+        .all(mover.project_id, mover.status_id, id) as unknown as { id: string; rank: string }[]
+    );
+
+    let beforeId = input.beforeId ?? null;
+    if (input.afterId) {
+      const at = column.findIndex((c) => c.id === input.afterId);
+      beforeId = at === -1 ? null : (column[at + 1]?.id ?? null);
     }
+
+    tx.prepare("UPDATE issues SET board_rank = ?, updated_at = ? WHERE id = ?").run(
+      rankForDrop(column, beforeId),
+      new Date().toISOString(),
+      id,
+    );
     return getIssue(id)!;
   });
 }

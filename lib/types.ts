@@ -204,7 +204,10 @@ export interface Issue {
   reporterUserId: string | null;
   priority: number;
   estimate: number | null;
+  /** Order among tree siblings only — first children of different parents share keys. */
   rank: string;
+  /** Order on the board, one sequence per project. Null only until the backfill on open. */
+  boardRank: string | null;
   /** `/id/id/` of every ancestor. Derived from parentId, never edited directly. */
   path: string;
   depth: number;

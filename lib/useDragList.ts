@@ -26,9 +26,11 @@ const THRESHOLD = 5;
 /**
  * Pointer-event dragging for a set of columns.
  *
- * Not the HTML5 drag-and-drop API: it has no touch support at all, its drag image cannot
- * be styled, and `dragover` fires in storms across nested targets. Pointer events give
- * touch for free and let the ghost be an ordinary element.
+ * Not the HTML5 drag-and-drop API: its drag image cannot be styled and `dragover` fires
+ * in storms across nested targets. Pointer events let the ghost be an ordinary element.
+ * (They do not make touch work by themselves — a finger on a card scrolls the page and
+ * the browser cancels the pointer — so this is a mouse and trackpad gesture; the
+ * keyboard path in BoardView covers everything else.)
  *
  * Not a library either — yet. The board is uniform-height cards in sorted columns, the
  * easy case. The hard case is re-parenting in a tree, and that is when a dependency
@@ -40,8 +42,18 @@ const THRESHOLD = 5;
  */
 export function useDragList({ onDrop }: Options) {
   const [dragging, setDragging] = useState<Dragging | null>(null);
-  const origin = useRef<{ x: number; y: number; id: string } | null>(null);
-  const armed = useRef(false);
+
+  // The window listeners live for one gesture and are attached from the pointerdown
+  // handler itself. They used to be attached by an effect keyed on a ref set there — but
+  // setting a ref does not render, so the effect never re-ran, nothing listened for
+  // pointermove, and no drag ever started. Listeners read the latest callback from here.
+  const onDropRef = useRef(onDrop);
+  useEffect(() => {
+    onDropRef.current = onDrop;
+  }, [onDrop]);
+
+  const detachRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => detachRef.current?.(), []);
 
   const findTarget = useCallback((x: number, y: number, draggedId: string): DropTarget | null => {
     const stack = document.elementsFromPoint(x, y);
@@ -63,70 +75,86 @@ export function useDragList({ onDrop }: Options) {
     return { columnId, beforeId: null };
   }, []);
 
-  const start = useCallback((event: React.PointerEvent, id: string) => {
-    // Left button only, and never from a control inside the card.
-    if (event.button !== 0) return;
-    if ((event.target as HTMLElement).closest("button, a, select, input")) return;
-    origin.current = { x: event.clientX, y: event.clientY, id };
-    armed.current = true;
-  }, []);
+  const start = useCallback(
+    (event: React.PointerEvent, id: string) => {
+      // Primary button of the primary pointer only, and never from a control in the card.
+      if (event.button !== 0 || !event.isPrimary) return;
+      if ((event.target as HTMLElement).closest("button, a, select, input, textarea")) return;
 
-  useEffect(() => {
-    if (!armed.current && !dragging) return;
+      detachRef.current?.();
 
-    const move = (event: PointerEvent) => {
-      const from = origin.current;
-      if (!from) return;
+      const pointerId = event.pointerId;
+      const originX = event.clientX;
+      const originY = event.clientY;
+      // The gesture's own copy of the state. React state is for painting; the handlers
+      // must not depend on a render having happened between two pointer events.
+      let current: Dragging | null = null;
 
-      if (!dragging) {
-        const far =
-          Math.abs(event.clientX - from.x) > THRESHOLD ||
-          Math.abs(event.clientY - from.y) > THRESHOLD;
-        if (!far) return;
-        const card = document.querySelector<HTMLElement>(`[data-card="${from.id}"]`);
-        setDragging({
-          id: from.id,
-          x: event.clientX,
-          y: event.clientY,
-          width: card?.getBoundingClientRect().width ?? 240,
-          target: findTarget(event.clientX, event.clientY, from.id),
-        });
-        return;
+      const move = (e: PointerEvent) => {
+        if (e.pointerId !== pointerId) return;
+        if (!current) {
+          const far =
+            Math.abs(e.clientX - originX) > THRESHOLD || Math.abs(e.clientY - originY) > THRESHOLD;
+          if (!far) return;
+          const card = document.querySelector<HTMLElement>(`[data-card="${CSS.escape(id)}"]`);
+          current = {
+            id,
+            x: e.clientX,
+            y: e.clientY,
+            width: card?.getBoundingClientRect().width ?? 240,
+            target: null,
+          };
+        }
+        current = {
+          ...current,
+          x: e.clientX,
+          y: e.clientY,
+          target: findTarget(e.clientX, e.clientY, id),
+        };
+        setDragging(current);
+      };
+
+      const end = (commit: boolean) => {
+        detach();
+        const finished = current;
+        current = null;
+        setDragging(null);
+        // Below the threshold this was a click, not a drag, and nothing should move.
+        if (commit && finished?.target) onDropRef.current(finished.id, finished.target);
+      };
+
+      const up = (e: PointerEvent) => {
+        if (e.pointerId === pointerId) end(true);
+      };
+      const cancel = (e: PointerEvent) => {
+        if (e.pointerId === pointerId) end(false);
+      };
+      const escape = (e: KeyboardEvent) => {
+        if (e.key === "Escape") end(false);
+      };
+      // Sweeping across column headers otherwise selects their text mid-drag.
+      const noSelect = (e: Event) => {
+        if (current) e.preventDefault();
+      };
+
+      function detach() {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", cancel);
+        window.removeEventListener("keydown", escape);
+        document.removeEventListener("selectstart", noSelect);
+        if (detachRef.current === detach) detachRef.current = null;
       }
 
-      setDragging({
-        ...dragging,
-        x: event.clientX,
-        y: event.clientY,
-        target: findTarget(event.clientX, event.clientY, dragging.id),
-      });
-    };
-
-    const finish = () => {
-      if (dragging?.target) onDrop(dragging.id, dragging.target);
-      origin.current = null;
-      armed.current = false;
-      setDragging(null);
-    };
-
-    const cancel = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      origin.current = null;
-      armed.current = false;
-      setDragging(null);
-    };
-
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", finish);
-    window.addEventListener("pointercancel", cancel as unknown as EventListener);
-    window.addEventListener("keydown", cancel);
-    return () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", finish);
-      window.removeEventListener("pointercancel", cancel as unknown as EventListener);
-      window.removeEventListener("keydown", cancel);
-    };
-  }, [dragging, findTarget, onDrop]);
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", cancel);
+      window.addEventListener("keydown", escape);
+      document.addEventListener("selectstart", noSelect);
+      detachRef.current = detach;
+    },
+    [findTarget],
+  );
 
   return { dragging, start };
 }

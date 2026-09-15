@@ -9,6 +9,7 @@ import Avatar from "@/components/shell/Avatar";
 import { EmptyState, Key } from "@/components/ui";
 import { useToast } from "@/components/Toast";
 import { useDragList, type DropTarget } from "@/lib/useDragList";
+import { rankForDrop } from "@/lib/rank";
 import type { Issue, Project, Status } from "@/lib/types";
 
 interface Props {
@@ -24,13 +25,28 @@ interface Position {
   index: number;
 }
 
+/** A drop the server has not confirmed yet, and the server state it was made against. */
+interface Pending {
+  from: { statusId: string; boardRank: string | null };
+  statusId: string;
+  boardRank: string;
+}
+
+/** Board order, with any card that predates board_rank after the rest, oldest first. */
+function byBoardOrder(a: Issue, b: Issue): number {
+  if (a.boardRank === b.boardRank) return a.number - b.number;
+  if (a.boardRank === null) return 1;
+  if (b.boardRank === null) return -1;
+  return a.boardRank < b.boardRank ? -1 : 1;
+}
+
 export default function BoardView({ project, issues, statuses, childCounts, selectedId }: Props) {
   const router = useRouter();
   const params = useSearchParams();
   const toast = useToast();
 
   /** Optimistic overrides, so a drop paints before the server answers. */
-  const [moved, setMoved] = useState<Record<string, string>>({});
+  const [moved, setMoved] = useState<Record<string, Pending>>({});
   const [focus, setFocus] = useState<Position>({ column: 0, index: 0 });
   const [held, setHeld] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
@@ -38,20 +54,52 @@ export default function BoardView({ project, issues, statuses, childCounts, sele
 
   const peopleById = useMemo(() => new Map(project.people.map((p) => [p.id, p])), [project]);
 
+  // An override applies only while the server still reports the card where it was when
+  // it was dropped. The moment the server says anything else — this drop confirmed, or a
+  // change made in the detail pane or by someone else — the server wins. Overrides used
+  // to apply forever, so a card dragged once kept its dragged column even after its
+  // status was changed somewhere else.
+  const placed = useMemo(
+    () =>
+      issues.map((issue) => {
+        const pending = moved[issue.id];
+        return pending &&
+          pending.from.statusId === issue.statusId &&
+          pending.from.boardRank === issue.boardRank
+          ? { ...issue, statusId: pending.statusId, boardRank: pending.boardRank }
+          : issue;
+      }),
+    [issues, moved],
+  );
+
   const columns = useMemo(
     () =>
       statuses.map((status) => ({
         status,
-        cards: issues
-          .filter((issue) => (moved[issue.id] ?? issue.statusId) === status.id)
-          .sort((a, b) => (a.rank < b.rank ? -1 : 1)),
+        cards: placed.filter((issue) => issue.statusId === status.id).sort(byBoardOrder),
       })),
-    [statuses, issues, moved],
+    [statuses, placed],
   );
 
   const apply = useCallback(
     async (id: string, statusId: string, beforeId: string | null) => {
-      setMoved((m) => ({ ...m, [id]: statusId }));
+      const issue = issues.find((i) => i.id === id);
+      const column = columns.find((c) => c.status.id === statusId);
+      if (!issue || !column) return;
+
+      // Dropped back where it already was: nothing to save, and no refresh to wait for.
+      const at = column.cards.findIndex((c) => c.id === id);
+      if (at !== -1 && (column.cards[at + 1]?.id ?? null) === beforeId) return;
+
+      const others = column.cards
+        .filter((c) => c.id !== id && c.boardRank !== null)
+        .map((c) => ({ id: c.id, rank: c.boardRank! }));
+      const pending: Pending = {
+        from: { statusId: issue.statusId, boardRank: issue.boardRank },
+        statusId,
+        boardRank: rankForDrop(others, beforeId),
+      };
+      setMoved((m) => ({ ...m, [id]: pending }));
       const res = await fetch(`/api/issues/${id}/move`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -69,7 +117,7 @@ export default function BoardView({ project, issues, statuses, childCounts, sele
       }
       router.refresh();
     },
-    [router, toast],
+    [issues, columns, router, toast],
   );
 
   const onDrop = useCallback(

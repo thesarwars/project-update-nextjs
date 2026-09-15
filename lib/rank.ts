@@ -94,3 +94,23 @@ export function initialRanks(count: number): string[] {
   }
   return out;
 }
+
+/**
+ * The key for an item dropped into an ordered list.
+ *
+ * `others` is the destination list without the item, in order. The item lands in front
+ * of `beforeId`, or at the end when that is null or not in the list. The server uses this
+ * to write the position and the board uses it to paint the drop before the server
+ * answers, so the two cannot disagree about where a card went.
+ */
+export function rankForDrop(others: { id: string; rank: string }[], beforeId: string | null): string {
+  const at = beforeId ? others.findIndex((o) => o.id === beforeId) : -1;
+  if (at === -1) return rankBetween(others.length ? others[others.length - 1].rank : null, null);
+
+  const next = others[at].rank;
+  const previous = at > 0 ? others[at - 1].rank : null;
+  // Equal neighbours cannot happen once every issue has its own board position, but a
+  // tie must degrade to "just in front of next", never to a thrown error mid-drag.
+  return rankBetween(previous !== null && previous < next ? previous : null, next);
+}
+
