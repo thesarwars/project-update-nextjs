@@ -24,6 +24,23 @@ interface Dragging {
 const THRESHOLD = 5;
 
 /**
+ * Eat the click the browser fires at the end of a drag.
+ *
+ * Cards open on click. When a drop ends over the card it started on — a small reorder,
+ * or a drag that changed its mind — the browser still dispatches a click there, and the
+ * card would open as if it had been clicked. The click arrives in the same task as the
+ * pointerup, so a capture-phase listener catches it; the timeout forgets it if none comes.
+ */
+function swallowNextClick(): void {
+  const swallow = (event: MouseEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
+  };
+  window.addEventListener("click", swallow, { capture: true, once: true });
+  setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0);
+}
+
+/**
  * Pointer-event dragging for a set of columns.
  *
  * Not the HTML5 drag-and-drop API: its drag image cannot be styled and `dragover` fires
@@ -119,7 +136,9 @@ export function useDragList({ onDrop }: Options) {
         const finished = current;
         current = null;
         setDragging(null);
-        // Below the threshold this was a click, not a drag, and nothing should move.
+        // Below the threshold this was a click, not a drag: nothing moves, and the click
+        // goes through to open the card.
+        if (finished) swallowNextClick();
         if (commit && finished?.target) onDropRef.current(finished.id, finished.target);
       };
 
@@ -130,7 +149,14 @@ export function useDragList({ onDrop }: Options) {
         if (e.pointerId === pointerId) end(false);
       };
       const escape = (e: KeyboardEvent) => {
-        if (e.key === "Escape") end(false);
+        if (e.key !== "Escape") return;
+        const wasDragging = current !== null;
+        end(false);
+        // The button is usually still down. Releasing it later over the card would click
+        // it open, which is not what cancelling a drag means.
+        if (wasDragging) {
+          window.addEventListener("pointerup", swallowNextClick, { capture: true, once: true });
+        }
       };
       // Sweeping across column headers otherwise selects their text mid-drag.
       const noSelect = (e: Event) => {

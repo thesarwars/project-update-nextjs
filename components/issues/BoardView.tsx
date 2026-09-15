@@ -128,6 +128,9 @@ export default function BoardView({ project, issues, statuses, childCounts, sele
 
   const cardAt = (position: Position) => columns[position.column]?.cards[position.index];
 
+  /** One way to open a card, shared by click and Enter so the two cannot drift apart. */
+  const open = (issue: Issue) => router.push(`/i/${issue.key}?${params}`);
+
   /**
    * The keyboard path, shipped with the drag rather than after it.
    *
@@ -161,7 +164,7 @@ export default function BoardView({ project, issues, statuses, childCounts, sele
 
     if (event.key === "Enter" && card) {
       event.preventDefault();
-      router.push(`/i/${card.key}?${params}`);
+      open(card);
       return;
     }
 
@@ -258,8 +261,17 @@ export default function BoardView({ project, issues, statuses, childCounts, sele
                     data-card={issue.id}
                     onPointerDown={(e) => start(e, issue.id)}
                     onMouseDown={() => setFocus({ column: columnIndex, index })}
+                    onClick={(e) => {
+                      // The key is a real link and handles its own click, and modified
+                      // clicks belong to the browser (new tab, new window). Only a plain
+                      // click on the body opens the card here. A click that ends a drag
+                      // never arrives: useDragList swallows it.
+                      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                      if ((e.target as HTMLElement).closest("a, button, input, select, textarea")) return;
+                      open(issue);
+                    }}
                     aria-grabbed={held === issue.id}
-                    className={`cursor-grab select-none rounded-lg border bg-surface p-2 card-shadow transition ${
+                    className={`cursor-pointer select-none rounded-lg border bg-surface p-2 card-shadow transition ${
                       dragging?.id === issue.id ? "opacity-40" : ""
                     } ${
                       held === issue.id
