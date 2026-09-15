@@ -9,7 +9,7 @@ import IssueTypeIcon, { relationshipLabel } from "./IssueTypeIcon";
 import PriorityIcon from "./PriorityIcon";
 import StatusPill from "./StatusPill";
 import Avatar from "@/components/shell/Avatar";
-import { Button, IconButton, inputClass } from "@/components/ui";
+import { Button, IconButton, buttonClass, iconBoxClass, inputClass } from "@/components/ui";
 import { useToast } from "@/components/Toast";
 import { useReportSave } from "@/components/shell/SaveProvider";
 import { useDebouncedSave } from "@/lib/useDebouncedSave";
@@ -207,9 +207,17 @@ export default function IssueDetail({
 
         <span className="ml-auto flex items-center gap-0.5">
           {layout === "pane" ? (
-            <IconButton label="Open full page" variant="ghost" size="sm" onClick={() => router.push(issueLink(issue.key))}>
+            // A real link, not a router.push: a client-side navigation to this URL is
+            // intercepted straight back into this pane, so only a full page load can
+            // reach the page underneath. It also means cmd-click opens a tab.
+            <a
+              href={issueLink(issue.key)}
+              aria-label="Open full page"
+              title="Open full page"
+              className={buttonClass("ghost", "sm", `!px-0 ${iconBoxClass("sm")}`)}
+            >
               <LuMaximize2 className="h-3.5 w-3.5" />
-            </IconButton>
+            </a>
           ) : null}
           <IconButton label="Close" variant="ghost" size="sm" onClick={() => router.push(backHref)}>
             <LuX className="h-4 w-4" />

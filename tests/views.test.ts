@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { issueHref, listHref, listViewFrom } from "../lib/views";
+import { issueHref, knownListView, listHref, listViewFrom } from "../lib/views";
 
 /**
  * Closing an issue has to land on the list it was opened from.
@@ -26,6 +26,17 @@ describe("listViewFrom", () => {
     // The whole reason this is a whitelist: the value ends up in a navigation.
     assert.equal(listViewFrom("//evil.example.com"), "backlog");
     assert.equal(listViewFrom("../../etc"), "backlog");
+  });
+});
+
+describe("knownListView", () => {
+  it("separates \"no origin\" from \"the backlog\", which listViewFrom cannot", () => {
+    // The sidebar needs the difference: a pasted issue link came from outside the app
+    // and should mark nothing, rather than lighting up the backlog.
+    assert.equal(knownListView("board"), "board");
+    assert.equal(knownListView(undefined), null);
+    assert.equal(knownListView("sprints"), null);
+    assert.equal(listViewFrom(undefined), "backlog");
   });
 });
 

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
+import { knownListView } from "@/lib/views";
 import {
   LuCalendarDays,
   LuCircleUser,
@@ -40,14 +41,20 @@ export default function Sidebar({ fallbackProjectId }: Props) {
   const projectId = params.get("project") ?? fallbackProjectId;
   const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
 
+  // An issue opened from a list is still that list's screen — the pane is sitting on top
+  // of it — so the list stays marked while the issue is open. A pasted issue link carries
+  // no `from` and marks nothing, which is honest: it came from outside the app.
+  const from = knownListView(params.get("from"));
+  const current = from && pathname.startsWith("/i/") ? `/${from}` : pathname;
+
   return (
     <nav
       aria-label="Sections"
       className="hidden w-[212px] shrink-0 flex-col gap-4 border-r border-line px-3 py-3 lg:flex"
     >
-      <Group items={PERSONAL} pathname={pathname} query={query} />
-      <Group title="Plan" items={PLAN} pathname={pathname} query={query} />
-      <Group title="Team" items={TEAM} pathname={pathname} query={query} />
+      <Group items={PERSONAL} current={current} query={query} />
+      <Group title="Plan" items={PLAN} current={current} query={query} />
+      <Group title="Team" items={TEAM} current={current} query={query} />
     </nav>
   );
 }
@@ -55,12 +62,13 @@ export default function Sidebar({ fallbackProjectId }: Props) {
 function Group({
   title,
   items,
-  pathname,
+  current,
   query,
 }: {
   title?: string;
   items: { href: string; label: string; icon: React.ComponentType<{ className?: string }> }[];
-  pathname: string;
+  /** The view being looked at, which is not always the path — see the pane above. */
+  current: string;
   query: string;
 }) {
   return (
@@ -71,7 +79,7 @@ function Group({
         </h2>
       ) : null}
       {items.map(({ href, label, icon: Icon }) => {
-        const active = pathname === href;
+        const active = current === href;
         return (
           <Link
             key={href}

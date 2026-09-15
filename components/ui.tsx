@@ -25,17 +25,22 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   size?: Size;
 }
 
+/** What a Button looks like, exposed so a real link can be made to look like one too. */
+export function buttonClass(variant: Variant = "secondary", size: Size = "md", extra = ""): string {
+  return `inline-flex select-none items-center justify-center font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${VARIANTS[variant]} ${SIZES[size]} ${extra}`;
+}
+
+/** The square an icon-only control sits in. */
+export function iconBoxClass(size: Size = "md"): string {
+  return size === "sm" ? "h-7 w-7" : size === "lg" ? "h-10 w-10" : "h-8 w-8";
+}
+
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
   { variant = "secondary", size = "md", className = "", type = "button", ...rest },
   ref,
 ) {
   return (
-    <button
-      ref={ref}
-      type={type}
-      className={`inline-flex select-none items-center justify-center font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${VARIANTS[variant]} ${SIZES[size]} ${className}`}
-      {...rest}
-    />
+    <button ref={ref} type={type} className={buttonClass(variant, size, className)} {...rest} />
   );
 });
 
@@ -47,14 +52,13 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
   { label, className = "", size = "md", ...rest },
   ref,
 ) {
-  const box = size === "sm" ? "h-7 w-7" : size === "lg" ? "h-10 w-10" : "h-8 w-8";
   return (
     <Button
       ref={ref}
       size={size}
       aria-label={label}
       title={label}
-      className={`!px-0 ${box} ${className}`}
+      className={`!px-0 ${iconBoxClass(size)} ${className}`}
       {...rest}
     />
   );

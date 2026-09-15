@@ -15,8 +15,13 @@ export type ListView = (typeof LIST_VIEWS)[number];
 
 export const DEFAULT_LIST_VIEW: ListView = "backlog";
 
+/** The view this names, or null when it names none — a pasted link carries no `from`. */
+export function knownListView(value: unknown): ListView | null {
+  return LIST_VIEWS.includes(value as ListView) ? (value as ListView) : null;
+}
+
 export function listViewFrom(value: unknown): ListView {
-  return LIST_VIEWS.includes(value as ListView) ? (value as ListView) : DEFAULT_LIST_VIEW;
+  return knownListView(value) ?? DEFAULT_LIST_VIEW;
 }
 
 /** The query keys that decide *which* list a view shows, and so have to survive a close. */

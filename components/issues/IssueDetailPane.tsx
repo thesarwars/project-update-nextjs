@@ -1,3 +1,4 @@
+import DetailSlot from "./DetailSlot";
 import IssueDetail from "./IssueDetail";
 import { canAccessProject } from "@/lib/permissions";
 import { childSchedule, loadIssueView } from "@/lib/issueView";
@@ -25,23 +26,25 @@ export default function IssueDetailPane({
   if (!view || !canAccessProject(user, view.project.id)) return null;
 
   return (
-    <div className="w-full border-l border-line px-3 py-3 lg:w-[440px] lg:overflow-y-auto thin-scroll">
-      <IssueDetail
-        key={view.issue.id}
-        issue={view.issue}
-        status={view.status}
-        statuses={view.statuses}
-        people={view.people}
-        ancestors={view.ancestors}
-        childIssues={view.children}
-        statusById={view.statusById}
-        mentions={view.mentions}
-        calendar={view.calendar}
-        entry={view.schedule[view.issue.id]}
-        childEntries={childSchedule(view)}
-        layout="pane"
-        backHref={backHref}
-      />
-    </div>
+    <DetailSlot>
+      <div className="w-full border-l border-line px-3 py-3 lg:w-[440px] lg:overflow-y-auto thin-scroll">
+        <IssueDetail
+          key={view.issue.id}
+          issue={view.issue}
+          status={view.status}
+          statuses={view.statuses}
+          people={view.people}
+          ancestors={view.ancestors}
+          childIssues={view.children}
+          statusById={view.statusById}
+          mentions={view.mentions}
+          calendar={view.calendar}
+          entry={view.schedule[view.issue.id]}
+          childEntries={childSchedule(view)}
+          layout="pane"
+          backHref={backHref}
+        />
+      </div>
+    </DetailSlot>
   );
 }
