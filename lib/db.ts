@@ -854,11 +854,21 @@ function open(): DatabaseSync {
       discardStaleHandle();
       if (!globalRef.__standupDb) return open();
       try {
+        // Every statement in SCHEMA is IF NOT EXISTS or a DROP/CREATE pair, so running it
+        // again is cheap and safe — and it is the only way a *table* added since this
+        // handle was opened ever appears. Columns had this covered and tables did not:
+        // status_moves shipped and every drop on the board answered 500 until a restart.
+        cached.exec(SCHEMA);
         addMissingColumns(cached);
+        runMigrations(cached);
+        // The constants in lib/types.ts are the source of truth for the hierarchy rules,
+        // and this is what its doc comment means by "written on every open".
+        seedIssueReferenceData(cached);
         // A hot reload can add a column to a database that is already open, but the
         // backfills that give it values used to run only on a cold open. board_rank
         // arrived exactly that way on a live dev server: the column appeared, every value
         // stayed NULL, and the first drop ranked one card against nothing.
+        backfillProjectTrackerDefaults(cached);
         backfillBoardRanks(cached);
       } catch (err) {
         throw describeOpenFailure(err);
