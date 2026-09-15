@@ -59,11 +59,23 @@ function tree(label: string) {
 
 const statusOf = (id: string) => db.getIssue(id)!.statusId;
 
-function cascade(id: string, statusId: string) {
+type Change = { id: string; key: string; statusId: string };
+type Result = {
+  issue: Issue;
+  moveId: string | null;
+  statusId: string;
+  moved: Change[];
+  skipped: Change[];
+  offer: Change[];
+};
+
+function cascade(id: string, statusId: string): Result {
   const result = db.updateIssueCascading(id, { statusId });
   assert.notEqual(typeof result, "string", `refused: ${String(result)}`);
-  return result as { issue: Issue; moved: { id: string; key: string; statusId: string }[] };
+  return result as Result;
 }
+
+const ids = (changes: Change[]) => changes.map((c) => c.id).sort();
 
 describe("status order", () => {
   it("ranks by category first, then by the project's own order", () => {
@@ -117,16 +129,19 @@ describe("updateIssueCascading", () => {
     assert.equal(statusOf(epic.id), todo.id);
   });
 
-  it("moves nothing when the parent goes backwards", () => {
+  // This used to assert that a backwards move touched nothing. It now puts back what it
+  // carried — see the block below for why that is a replay of a record rather than a
+  // second cascade in the other direction.
+  it("puts back what it carried when the parent goes backwards", () => {
     const { epic, story, subs } = tree("backwards");
     cascade(epic.id, inReview.id);
 
     const { moved } = cascade(epic.id, todo.id);
 
-    assert.equal(moved.length, 1, "only the epic itself");
     assert.equal(statusOf(epic.id), todo.id);
-    assert.equal(statusOf(story.id), inReview.id, "the work under it stays where it got to");
-    assert.equal(statusOf(subs[0].id), inReview.id);
+    assert.equal(statusOf(story.id), todo.id, "carried forward, so carried back");
+    assert.equal(statusOf(subs[0].id), todo.id);
+    assert.equal(moved.length, 7, "the epic and the six it had carried");
   });
 
   it("restores the tree when the reported moves are replayed", () => {
@@ -168,5 +183,172 @@ describe("updateIssueCascading", () => {
     const { subs } = tree("leaf");
     const { moved } = cascade(subs[0].id, inProgress.id);
     assert.equal(moved.length, 1, "just the issue the person moved");
+  });
+});
+
+/**
+ * Putting a move back.
+ *
+ * Dragging a parent back cannot mean "move everything sitting in the status I am
+ * leaving": an epic over five stories, two of which someone started on their own, would
+ * drag those two back as well. Each move is recorded, so going back replays exactly what
+ * that move picked up — the two independent ones were never in the record.
+ */
+describe("putting a status move back", () => {
+  /** An epic with five stories, in rank order. */
+  function fan(label: string) {
+    const epic = made(db.createIssue({ projectId: project.id, type: "epic", title: `${label} epic` }));
+    const stories = [1, 2, 3, 4, 5].map((n) =>
+      made(
+        db.createIssue({
+          projectId: project.id,
+          type: "story",
+          parentId: epic.id,
+          title: `${label} story ${n}`,
+        }),
+      ),
+    );
+    return { epic, stories };
+  }
+
+  it("leaves work that was already in progress on its own", () => {
+    const { epic, stories } = fan("fan");
+    // Two of the five were started by someone, before the epic moved anywhere.
+    db.updateIssue(stories[3].id, { statusId: inProgress.id });
+    db.updateIssue(stories[4].id, { statusId: inProgress.id });
+
+    const forward = cascade(epic.id, inProgress.id);
+    assert.deepEqual(
+      ids(forward.moved),
+      ids([{ id: epic.id }, ...stories.slice(0, 3).map((s) => ({ id: s.id }))] as Change[]),
+      "only the three that were behind came along",
+    );
+
+    const back = cascade(epic.id, todo.id);
+
+    assert.equal(statusOf(epic.id), todo.id);
+    for (const story of stories.slice(0, 3)) {
+      assert.equal(statusOf(story.id), todo.id, "carried forward, so carried back");
+    }
+    for (const story of stories.slice(3)) {
+      assert.equal(statusOf(story.id), inProgress.id, "never in the record, never touched");
+    }
+    assert.equal(back.moved.length, 4, "the epic and the three it had carried");
+    assert.equal(back.offer.length, 0, "there was a record, so nothing to offer");
+  });
+
+  it("leaves a child that someone has moved on since, and says which", () => {
+    const { epic, stories } = fan("moved-on");
+    cascade(epic.id, inProgress.id);
+    // Someone picks one up and pushes it further while the epic sits there.
+    db.updateIssue(stories[0].id, { statusId: inReview.id });
+
+    const back = cascade(epic.id, todo.id);
+
+    assert.equal(statusOf(stories[0].id), inReview.id, "their work wins over the rewind");
+    assert.deepEqual(ids(back.skipped), [stories[0].id]);
+    assert.equal(statusOf(stories[1].id), todo.id);
+    assert.equal(back.moved.length, 5, "the epic and the four still where it left them");
+  });
+
+  it("walks back through more than one step", () => {
+    const { epic, stories } = fan("chain");
+    cascade(epic.id, inProgress.id);
+    cascade(epic.id, inReview.id);
+    for (const story of stories) assert.equal(statusOf(story.id), inReview.id);
+
+    cascade(epic.id, todo.id);
+
+    assert.equal(statusOf(epic.id), todo.id);
+    for (const story of stories) {
+      assert.equal(statusOf(story.id), todo.id, "both records were replayed, in order");
+    }
+  });
+
+  it("stops at the step it was asked for", () => {
+    const { epic, stories } = fan("one-step");
+    cascade(epic.id, inProgress.id);
+    cascade(epic.id, inReview.id);
+
+    cascade(epic.id, inProgress.id);
+
+    assert.equal(statusOf(epic.id), inProgress.id);
+    for (const story of stories) {
+      assert.equal(statusOf(story.id), inProgress.id, "back one step, not two");
+    }
+  });
+
+  it("offers the rest when there is no record to replay", () => {
+    const { epic, stories } = fan("no-record");
+    // Moved forward without a record, as anything done before this existed would be.
+    db.updateIssue(epic.id, { statusId: inProgress.id });
+    for (const story of stories) db.updateIssue(story.id, { statusId: inProgress.id });
+
+    const back = cascade(epic.id, todo.id);
+
+    assert.equal(statusOf(epic.id), todo.id);
+    assert.equal(back.moved.length, 1, "the epic alone — nothing was assumed");
+    assert.deepEqual(ids(back.offer), ids(stories.map((s) => ({ id: s.id })) as Change[]));
+    for (const story of stories) assert.equal(statusOf(story.id), inProgress.id);
+  });
+
+  it("offers rather than replaying when someone else moved the parent", () => {
+    const { epic, stories } = fan("hijacked");
+    cascade(epic.id, inProgress.id);
+    // Somebody moves the epic on, so the record no longer describes where it is.
+    db.updateIssue(epic.id, { statusId: inReview.id });
+
+    const back = cascade(epic.id, inProgress.id);
+
+    assert.equal(back.moved.length, 1);
+    assert.equal(back.offer.length, 0, "nothing sits in In review under it");
+    for (const story of stories) {
+      assert.equal(statusOf(story.id), inProgress.id, "the broken chain replays nothing");
+    }
+  });
+
+  it("is what Undo replays, once", () => {
+    const { epic, stories } = fan("undo-once");
+    const forward = cascade(epic.id, inProgress.id);
+    assert.ok(forward.moveId);
+
+    const first = db.revertStatusMove(forward.moveId!) as { moved: Change[]; skipped: Change[] };
+    assert.equal(first.moved.length, 6, "the epic and its five stories");
+    assert.equal(statusOf(epic.id), todo.id, "Undo puts the subject back too");
+    for (const story of stories) assert.equal(statusOf(story.id), todo.id);
+
+    // Clicking it twice, or dragging the parent back after clicking it, changes nothing.
+    const second = db.revertStatusMove(forward.moveId!) as { moved: Change[] };
+    assert.equal(second.moved.length, 0);
+  });
+
+  it("restores the resolved date a move overwrote", () => {
+    const { epic, stories } = fan("resolved");
+    db.updateIssue(stories[0].id, { statusId: done.id });
+    const finishedAt = db.getIssue(stories[0].id)!.resolvedAt;
+
+    // Closing the epic as Won't do carries the Done story, because Won't do sorts after
+    // Done in this project's own order.
+    cascade(epic.id, wontDo.id);
+    assert.equal(statusOf(stories[0].id), wontDo.id);
+
+    cascade(epic.id, todo.id);
+
+    assert.equal(statusOf(stories[0].id), done.id);
+    assert.equal(db.getIssue(stories[0].id)!.resolvedAt, finishedAt, "the original date, not a new one");
+  });
+
+  it("does not carry anything forward on the way back", () => {
+    const { epic, stories } = fan("no-forward");
+    const task = made(
+      db.createIssue({ projectId: project.id, type: "task", parentId: stories[0].id, title: "under" }),
+    );
+    cascade(epic.id, inProgress.id);
+    assert.equal(statusOf(task.id), inProgress.id);
+
+    cascade(epic.id, todo.id);
+
+    assert.equal(statusOf(task.id), todo.id, "put back with its story");
+    assert.equal(statusOf(stories[1].id), todo.id);
   });
 });

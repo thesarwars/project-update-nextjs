@@ -12,7 +12,7 @@ import { useDragList, type DropTarget } from "@/lib/useDragList";
 import { rankForDrop } from "@/lib/rank";
 import type { TimeBadge } from "@/lib/schedule";
 import { issueHref } from "@/lib/views";
-import { cascadeMessage, restoreStatuses, type MoveResult } from "@/lib/statusMove";
+import { moveAlso, moveReport, undoMove, type MoveResult } from "@/lib/statusMove";
 import type { Issue, Project, Status } from "@/lib/types";
 
 interface Props {
@@ -128,29 +128,33 @@ export default function BoardView({
         return;
       }
 
-      // A drop on a parent takes the unstarted work under it along. Say so, and offer to
-      // put it back — the cards that moved may be in a column that is scrolled away.
-      const { moved = [] } = (await res.json().catch(() => ({}))) as MoveResult;
-      const message = cascadeMessage(moved, column.status.name);
-      if (message) {
+      // A drop on a parent carries the work behind it, or puts back what it carried
+      // before. Say what happened — the cards involved may be in a column scrolled out of
+      // sight — and hand back the way to reverse it.
+      const result = (await res.json().catch(() => ({}))) as MoveResult;
+      const report = moveReport(result, column.status.name);
+      if (report) {
         toast({
-          message,
-          action: {
-            label: "Undo",
+          message: report.message,
+          action: report.action && {
+            label: report.action.label,
             run: () => {
-              void restoreStatuses(moved).then((ok) => {
-                if (!ok) toast("Could not put all of those back.");
-                // The dragged card's optimistic override is keyed to the state it was
-                // dropped from — which an undo restores exactly — so leaving it in place
-                // would re-apply it and paint the card back in the column it just left,
-                // disagreeing with the database. Undoing the move retires the override.
+              const kind = report.action!.kind;
+              const done = (ok: boolean) => {
+                if (!ok) toast("Could not change all of those.");
+                // An undo restores the exact state this card was dropped from, which is
+                // what its optimistic override is keyed to — leaving the override in
+                // place would paint the card back in the column it just left, and
+                // disagree with the database. Reversing a move retires the override.
                 setMoved((m) => {
                   const next = { ...m };
-                  for (const change of moved) delete next[change.id];
+                  for (const change of result.moved ?? []) delete next[change.id];
                   return next;
                 });
                 router.refresh();
-              });
+              };
+              if (kind === "undo" && result.moveId) void undoMove(result.moveId).then(done);
+              else void moveAlso(result.offer ?? [], result.statusId ?? "").then(done);
             },
           },
         });

@@ -12,6 +12,7 @@ import {
   DEFAULT_STATUSES,
   isBehind,
   type StatusChange,
+  type StatusMoveResult,
   ISSUE_TYPES,
   ISSUE_TYPE_META,
   PARENT_RULES,
@@ -302,6 +303,30 @@ CREATE TABLE IF NOT EXISTS entry_mentions (
   PRIMARY KEY (project_id, date, person_id, section, issue_id)
 );
 CREATE INDEX IF NOT EXISTS entry_mentions_by_issue ON entry_mentions(issue_id, date DESC);
+
+-- What a status change did, so putting it back is a replay rather than a guess.
+--
+-- A cascade carries the work behind a parent forward. Dragging the parent back has to
+-- put down exactly what that move picked up — not everything that happens to sit in the
+-- status it is leaving, which would drag back work somebody started on their own.
+CREATE TABLE IF NOT EXISTS status_moves (
+  id             TEXT PRIMARY KEY,
+  project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  -- The issue a person actually moved. Everything else in items_json came along.
+  subject_id     TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+  -- Duplicated out of items_json so the chain can be walked by an index.
+  from_status_id TEXT NOT NULL,
+  to_status_id   TEXT NOT NULL,
+  moved_at       TEXT NOT NULL,
+  moved_by       TEXT REFERENCES users(id) ON DELETE SET NULL,
+  -- Set once put back, so a record is never replayed twice.
+  reverted_at    TEXT,
+  -- [{ id, from, to, resolvedAt }], subject first. JSON rather than a side table, as
+  -- sprint_reports does: it is read whole or not at all.
+  items_json     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS status_moves_subject
+  ON status_moves(subject_id, reverted_at, moved_at DESC);
 
 CREATE TABLE IF NOT EXISTS sprint_reports (
   sprint_id     TEXT PRIMARY KEY REFERENCES sprints(id) ON DELETE CASCADE,
@@ -2267,25 +2292,84 @@ export function updateIssue(
   return outcome ?? getIssue(id)!;
 }
 
+/* ------------------------------------------------------------------ *
+ * Status moves
+ * ------------------------------------------------------------------ */
+
+/** One issue a move changed. The subject is always the first item. */
+interface MoveItem {
+  id: string;
+  from: string;
+  to: string;
+  /** The resolved date it had, so putting it back restores that too, not a fresh one. */
+  resolvedAt: string | null;
+}
+
+function statusRow(tx: DatabaseSync, id: string): Status | null {
+  const row = tx.prepare("SELECT * FROM statuses WHERE id = ?").get(id) as unknown as
+    | Row
+    | undefined;
+  return row ? toStatus(row) : null;
+}
+
+/** Status-only write: no version check, because these issues were carried, not edited. */
+function writeStatus(
+  tx: DatabaseSync,
+  issueId: string,
+  statusId: string,
+  resolvedAt: string | null,
+): void {
+  tx.prepare(
+    `UPDATE issues SET status_id = ?, resolved_at = ?, updated_at = ?, version = version + 1
+      WHERE id = ?`,
+  ).run(statusId, resolvedAt, new Date().toISOString(), issueId);
+}
+
+const emptyMove = (statusId: string): StatusMoveResult => ({
+  moveId: null,
+  statusId,
+  moved: [],
+  skipped: [],
+  offer: [],
+});
+
+/** Every live descendant, with the status and resolved date it has right now. */
+function descendantsOf(
+  tx: DatabaseSync,
+  issue: { id: string; path: string; project_id: string },
+): Row[] {
+  const prefix = prefixOf({ path: issue.path, id: issue.id });
+  return tx
+    .prepare(
+      `SELECT d.id AS id, d.number AS number, d.status_id AS status_id,
+              d.resolved_at AS resolved_at, s.category AS category, s.sort_order AS sort_order
+         FROM issues d
+         JOIN statuses s ON s.id = d.status_id
+        WHERE d.project_id = ? AND d.archived_at IS NULL
+          AND d.path >= ? AND d.path < ?`,
+    )
+    .all(issue.project_id, prefix, rangeEnd(prefix)) as unknown as Row[];
+}
+
 /**
- * Edit an issue, and carry the work under it along when that moves its status.
+ * Edit an issue, and let its status change carry the work under it.
  *
- * Moving a parent by hand and then moving each child by hand is the same intent typed
- * five times, so a status change takes its descendants with it. Only the ones that are
- * *behind* the new status move: an epic dragged to In progress pulls its To do children
- * along and leaves the ones already in review or done exactly where they are. That is
- * what makes it safe — `updateIssue` stamps `resolved_at` from the new status, so
- * dragging a finished subtask backwards would erase the day it was finished.
+ * Forward, a parent takes every descendant that is *behind* the new status with it and
+ * writes down what it took. Backwards, it puts down exactly what that record says it
+ * picked up — and only the issues still sitting where the record left them, so work
+ * somebody has moved on since is never rewound. Anything that was already in progress on
+ * its own was never in the record, so it is never touched.
  *
- * It follows that a backwards move cascades nothing, which is also what makes undo
- * work: putting everything back is a set of backwards moves.
+ * Only issues behind the target ever move, which is what protects `resolved_at`: dragging
+ * a finished subtask backwards would erase the day it was finished.
  */
 export function updateIssueCascading(
   id: string,
   patch: IssuePatch,
   expectedVersion?: number,
-): { issue: Issue; moved: StatusChange[] } | IssueError {
-  const outcome = withWrite((tx): IssueError | StatusChange[] => {
+  by?: string | null,
+): ({ issue: Issue } & StatusMoveResult) | IssueError {
+  const outcome = withWrite((tx): IssueError | StatusMoveResult => {
     const row = tx.prepare("SELECT * FROM issues WHERE id = ?").get(id) as unknown as
       | Row
       | undefined;
@@ -2294,58 +2378,223 @@ export function updateIssueCascading(
     const before = String(row.status_id);
     const updated = updateIssue(id, patch, expectedVersion);
     if (typeof updated === "string") return updated;
-    if (patch.statusId === undefined || patch.statusId === before) return [];
+    if (patch.statusId === undefined || patch.statusId === before) return emptyMove(before);
 
     const projectId = String(row.project_id);
-    const targetRow = tx
-      .prepare("SELECT * FROM statuses WHERE id = ? AND project_id = ?")
-      .get(patch.statusId, projectId) as unknown as Row | undefined;
-    if (!targetRow) return "not-found";
-    const target = toStatus(targetRow);
-
-    // One range scan over the indexed path, with each descendant's status alongside it.
-    const prefix = prefixOf({ path: String(row.path), id });
-    const descendants = tx
-      .prepare(
-        `SELECT d.id AS id, d.number AS number, d.status_id AS status_id,
-                s.category AS category, s.sort_order AS sort_order
-           FROM issues d
-           JOIN statuses s ON s.id = d.status_id
-          WHERE d.project_id = ? AND d.archived_at IS NULL
-            AND d.path >= ? AND d.path < ?`,
-      )
-      .all(projectId, prefix, rangeEnd(prefix)) as unknown as Row[];
+    const target = statusRow(tx, patch.statusId);
+    const current = statusRow(tx, before);
+    if (!target || !current || target.projectId !== projectId) return "not-found";
 
     const key = projectKeyOf(tx, projectId);
-    const moved: StatusChange[] = [
-      { id, key: `${key}-${Number(row.number)}`, statusId: before },
-    ];
+    const named = (issueId: string, number: number, statusId: string): StatusChange => ({
+      id: issueId,
+      key: `${key}-${number}`,
+      statusId,
+    });
+    const subject = named(id, Number(row.number), before);
+    const issue = { id, path: String(row.path), project_id: projectId };
 
-    const resolvedAt = target.isDone ? new Date().toISOString() : null;
-    const write = tx.prepare(
-      `UPDATE issues SET status_id = ?, resolved_at = ?, updated_at = ?, version = version + 1
-        WHERE id = ?`,
-    );
-    for (const d of descendants) {
-      const status = {
-        category: String(d.category) as StatusCategory,
-        sortOrder: Number(d.sort_order),
-      };
-      if (!isBehind(status, target)) continue;
-      // No version check: these are collateral, and the person who dragged the parent is
-      // not looking at a form for each child to conflict with.
-      write.run(target.id, resolvedAt, new Date().toISOString(), String(d.id));
-      moved.push({
-        id: String(d.id),
-        key: `${key}-${Number(d.number)}`,
-        statusId: String(d.status_id),
-      });
-    }
-    return moved;
+    return isBehind(current, target)
+      ? carryForward(tx, { issue, subject, target, by, projectId, number: Number(row.number) })
+      : putBack(tx, { issue, subject, target, current, key });
   });
 
   if (typeof outcome === "string") return outcome;
-  return { issue: getIssue(id)!, moved: outcome };
+  return { issue: getIssue(id)!, ...outcome };
+}
+
+/** The forward half: take the descendants that are behind `target`, and write it down. */
+function carryForward(
+  tx: DatabaseSync,
+  ctx: {
+    issue: { id: string; path: string; project_id: string };
+    subject: StatusChange;
+    target: Status;
+    by?: string | null;
+    projectId: string;
+    number: number;
+  },
+): StatusMoveResult {
+  const { issue, subject, target } = ctx;
+  const resolvedAt = target.isDone ? new Date().toISOString() : null;
+  const key = subject.key.slice(0, subject.key.lastIndexOf("-"));
+
+  const items: MoveItem[] = [
+    { id: issue.id, from: subject.statusId, to: target.id, resolvedAt: null },
+  ];
+  const moved: StatusChange[] = [subject];
+
+  for (const d of descendantsOf(tx, issue)) {
+    const status = {
+      category: String(d.category) as StatusCategory,
+      sortOrder: Number(d.sort_order),
+    };
+    if (!isBehind(status, target)) continue;
+    const issueId = String(d.id);
+    items.push({
+      id: issueId,
+      from: String(d.status_id),
+      to: target.id,
+      resolvedAt: d.resolved_at == null ? null : String(d.resolved_at),
+    });
+    writeStatus(tx, issueId, target.id, resolvedAt);
+    moved.push({ id: issueId, key: `${key}-${Number(d.number)}`, statusId: String(d.status_id) });
+  }
+
+  // Recorded even when nothing came along: an intermediate step that carried nothing
+  // still has to be findable, or the chain back to the step before it is broken.
+  const moveId = newId("mov");
+  tx.prepare(
+    `INSERT INTO status_moves
+       (id, project_id, subject_id, from_status_id, to_status_id, moved_at, moved_by, items_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    moveId,
+    ctx.projectId,
+    issue.id,
+    subject.statusId,
+    target.id,
+    new Date().toISOString(),
+    ctx.by ?? null,
+    JSON.stringify(items),
+  );
+
+  return { moveId, statusId: target.id, moved, skipped: [], offer: [] };
+}
+
+/**
+ * The backward half: replay the records that put this issue where it was, newest first.
+ *
+ * Walking the chain matters when the drag goes back more than one step — In review to
+ * To do puts down what the In review move picked up, then what the In progress one did.
+ * The subject itself is skipped in each record, because the drag already said where it
+ * should land.
+ */
+function putBack(
+  tx: DatabaseSync,
+  ctx: {
+    issue: { id: string; path: string; project_id: string };
+    subject: StatusChange;
+    target: Status;
+    current: Status;
+    key: string;
+  },
+): StatusMoveResult {
+  const { issue, subject, target, key } = ctx;
+  const moved: StatusChange[] = [subject];
+  const skipped: StatusChange[] = [];
+  const find = tx.prepare(
+    `SELECT id, from_status_id, items_json FROM status_moves
+      WHERE subject_id = ? AND reverted_at IS NULL AND to_status_id = ?
+      ORDER BY moved_at DESC LIMIT 1`,
+  );
+
+  let chainFrom = subject.statusId;
+  let replayed = false;
+  // MAX_DEPTH levels of status is already more than any project has; the bound is a
+  // backstop against a cycle in the records rather than a real limit.
+  for (let step = 0; step < 20; step += 1) {
+    const record = find.get(issue.id, chainFrom) as unknown as Row | undefined;
+    if (!record) break;
+
+    for (const item of JSON.parse(String(record.items_json)) as MoveItem[]) {
+      if (item.id === issue.id) continue;
+      const now = tx
+        .prepare("SELECT number, status_id FROM issues WHERE id = ? AND archived_at IS NULL")
+        .get(item.id) as unknown as Row | undefined;
+      if (!now) continue;
+      const change = {
+        id: item.id,
+        key: `${key}-${Number(now.number)}`,
+        statusId: String(now.status_id),
+      };
+      // Somebody has worked on it since. Their move wins over this one being undone.
+      if (String(now.status_id) !== item.to) {
+        skipped.push(change);
+        continue;
+      }
+      writeStatus(tx, item.id, item.from, item.resolvedAt);
+      moved.push(change);
+    }
+
+    tx.prepare("UPDATE status_moves SET reverted_at = ? WHERE id = ?").run(
+      new Date().toISOString(),
+      String(record.id),
+    );
+    replayed = true;
+    chainFrom = String(record.from_status_id);
+
+    const from = statusRow(tx, chainFrom);
+    if (!from || !isBehind(target, from)) break;
+  }
+
+  if (replayed) return { moveId: null, statusId: target.id, moved, skipped, offer: [] };
+
+  // Nothing to replay: this issue was moved forward before any of this was recorded, or
+  // the record has already been put back. Offer what is sitting in the status it left
+  // rather than assuming any of it came from here.
+  const offer = descendantsOf(tx, issue)
+    .filter((d) => String(d.status_id) === subject.statusId)
+    .map((d) => ({
+      id: String(d.id),
+      key: `${key}-${Number(d.number)}`,
+      statusId: String(d.status_id),
+    }));
+  return { moveId: null, statusId: target.id, moved, skipped, offer };
+}
+
+/** Enough of a record to check who is allowed to put it back. */
+export function getStatusMove(id: string): { id: string; projectId: string } | null {
+  const row = open()
+    .prepare("SELECT id, project_id FROM status_moves WHERE id = ?")
+    .get(id) as { id: string; project_id: string } | undefined;
+  return row ? { id: row.id, projectId: row.project_id } : null;
+}
+
+/**
+ * Put a recorded move back, subject included. What the Undo button calls.
+ *
+ * Idempotent: a record that has already been put back reports nothing moved, so an Undo
+ * clicked twice — or clicked after the parent was dragged back by hand — is harmless.
+ */
+export function revertStatusMove(
+  moveId: string,
+): { moved: StatusChange[]; skipped: StatusChange[] } | IssueError {
+  return withWrite((tx): { moved: StatusChange[]; skipped: StatusChange[] } | IssueError => {
+    const record = tx.prepare("SELECT * FROM status_moves WHERE id = ?").get(moveId) as unknown as
+      | Row
+      | undefined;
+    if (!record) return "not-found";
+    if (record.reverted_at != null) return { moved: [], skipped: [] };
+
+    const key = projectKeyOf(tx, String(record.project_id));
+    const moved: StatusChange[] = [];
+    const skipped: StatusChange[] = [];
+
+    for (const item of JSON.parse(String(record.items_json)) as MoveItem[]) {
+      const now = tx
+        .prepare("SELECT number, status_id FROM issues WHERE id = ? AND archived_at IS NULL")
+        .get(item.id) as unknown as Row | undefined;
+      if (!now) continue;
+      const change = {
+        id: item.id,
+        key: `${key}-${Number(now.number)}`,
+        statusId: String(now.status_id),
+      };
+      if (String(now.status_id) !== item.to) {
+        skipped.push(change);
+        continue;
+      }
+      writeStatus(tx, item.id, item.from, item.resolvedAt);
+      moved.push(change);
+    }
+
+    tx.prepare("UPDATE status_moves SET reverted_at = ? WHERE id = ?").run(
+      new Date().toISOString(),
+      moveId,
+    );
+    return { moved, skipped };
+  });
 }
 
 export interface MoveIssue {
@@ -2489,18 +2738,27 @@ export function moveIssue(id: string, move: MoveIssue): Issue | IssueError {
 export function moveIssueOnBoard(
   id: string,
   input: { statusId?: string; beforeId?: string | null; afterId?: string | null },
-): { issue: Issue; moved: StatusChange[] } | IssueError {
-  return withWrite((tx): { issue: Issue; moved: StatusChange[] } | IssueError => {
-    let moved: StatusChange[] = [];
+  by?: string | null,
+): ({ issue: Issue } & StatusMoveResult) | IssueError {
+  return withWrite((tx): ({ issue: Issue } & StatusMoveResult) | IssueError => {
+    let result: StatusMoveResult = {
+      moveId: null,
+      statusId: input.statusId ?? "",
+      moved: [],
+      skipped: [],
+      offer: [],
+    };
     if (input.statusId) {
       // The same rule as the detail pane's status menu: a drop is a status change, and a
-      // status change carries the work under it.
-      const updated = updateIssueCascading(id, { statusId: input.statusId });
+      // status change carries the work under it — or puts it back.
+      const updated = updateIssueCascading(id, { statusId: input.statusId }, undefined, by);
       if (typeof updated === "string") return updated;
-      moved = updated.moved;
+      result = updated;
     }
+    // The spread comes first so the issue read back after the reorder wins over the one
+    // the status change returned.
     if (input.beforeId === undefined && input.afterId === undefined) {
-      return { issue: getIssue(id)!, moved };
+      return { ...result, issue: getIssue(id)! };
     }
 
     const mover = tx.prepare("SELECT project_id, status_id FROM issues WHERE id = ?").get(id) as
@@ -2529,7 +2787,7 @@ export function moveIssueOnBoard(
       new Date().toISOString(),
       id,
     );
-    return { issue: getIssue(id)!, moved };
+    return { ...result, issue: getIssue(id)! };
   });
 }
 

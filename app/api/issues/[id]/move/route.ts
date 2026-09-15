@@ -36,14 +36,14 @@ export async function POST(request: NextRequest, ctx: RouteContext<"/api/issues/
   const statusId = typeof body.statusId === "string" ? body.statusId : undefined;
 
   if (statusId) {
-    const result = moveIssueOnBoard(id, {
-      statusId,
-      beforeId: asId(body.beforeId),
-      afterId: asId(body.afterId),
-    });
+    const result = moveIssueOnBoard(
+      id,
+      { statusId, beforeId: asId(body.beforeId), afterId: asId(body.afterId) },
+      auth.id,
+    );
     if (typeof result === "string") return refusal(result, existing.type);
-    // `moved` is every issue the drop carried along, each with the status it had, so the
-    // board can say what happened and offer to put it back.
+    // Carries `moved`, `skipped` and `offer`, so the board can say what the drop did and
+    // hand back a way to undo it.
     return json(result);
   }
 
@@ -54,5 +54,5 @@ export async function POST(request: NextRequest, ctx: RouteContext<"/api/issues/
   });
 
   if (typeof result === "string") return refusal(result, existing.type);
-  return json({ issue: result, moved: [] });
+  return json({ issue: result, moveId: null, moved: [], skipped: [], offer: [] });
 }

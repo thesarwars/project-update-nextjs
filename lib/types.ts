@@ -227,6 +227,29 @@ export interface StatusChange {
   statusId: string;
 }
 
+/**
+ * The outcome of a status change that may have carried other issues with it.
+ *
+ * Moving a parent forward takes the work behind it along; moving it back puts down
+ * exactly what that move picked up, and nothing else. The three lists are what the
+ * person who made the move needs to be told.
+ */
+export interface StatusMoveResult {
+  /** The record this wrote, when there is one to put back. Null for a revert. */
+  moveId: string | null;
+  /** The status the subject ended up in. */
+  statusId: string;
+  /** What changed, subject first, each carrying the status it had before. */
+  moved: StatusChange[];
+  /** Recorded as carried, but left alone because they have moved on since. */
+  skipped: StatusChange[];
+  /**
+   * Descendants still sitting in the status the subject just left, offered when there
+   * was no record to replay. The app asks rather than guessing which of them belong.
+   */
+  offer: StatusChange[];
+}
+
 export const PRIORITIES = [1, 2, 3, 4, 5] as const;
 export const PRIORITY_LABELS: Record<number, string> = {
   1: "Highest",

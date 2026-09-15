@@ -53,6 +53,7 @@ export async function PATCH(request: NextRequest, ctx: RouteContext<"/api/issues
     id,
     patch,
     typeof body.version === "number" ? body.version : undefined,
+    auth.id,
   );
 
   if (result === "conflict") {

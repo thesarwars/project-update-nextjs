@@ -20,7 +20,7 @@ import {
   type ScheduleEntry,
   type WorkCalendar,
 } from "@/lib/schedule";
-import { cascadeMessage, restoreStatuses, type MoveResult } from "@/lib/statusMove";
+import { moveAlso, moveReport, undoMove, type MoveResult } from "@/lib/statusMove";
 import type { Mention } from "@/lib/db";
 import {
   DEFAULT_LABELS,
@@ -148,18 +148,23 @@ export default function IssueDetail({
    */
   const changeStatus = async (statusId: string) => {
     const result = await patch({ statusId });
-    const moved = result?.moved ?? [];
-    const message = cascadeMessage(moved, statuses.find((s) => s.id === statusId)?.name ?? "");
-    if (!message) return;
+    if (!result) return;
+    const report = moveReport(result, statuses.find((s) => s.id === statusId)?.name ?? "");
+    if (!report) return;
     toast({
-      message,
-      action: {
-        label: "Undo",
+      message: report.message,
+      action: report.action && {
+        label: report.action.label,
         run: () => {
-          void restoreStatuses(moved).then((ok) => {
-            if (!ok) toast("Could not put all of those back.");
+          const done = (ok: boolean) => {
+            if (!ok) toast("Could not change all of those.");
             router.refresh();
-          });
+          };
+          if (report.action!.kind === "undo" && result.moveId) {
+            void undoMove(result.moveId).then(done);
+          } else {
+            void moveAlso(result.offer ?? [], result.statusId ?? "").then(done);
+          }
         },
       },
     });
