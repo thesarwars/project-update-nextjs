@@ -12,6 +12,7 @@ import {
   DEFAULT_STATUSES,
   isBehind,
   type StatusChange,
+  type StatusMove,
   type StatusMoveResult,
   ISSUE_TYPES,
   ISSUE_TYPE_META,
@@ -2432,7 +2433,9 @@ function carryForward(
   const items: MoveItem[] = [
     { id: issue.id, from: subject.statusId, to: target.id, resolvedAt: null },
   ];
-  const moved: StatusChange[] = [subject];
+  const moved: StatusMove[] = [
+    { id: issue.id, key: subject.key, from: subject.statusId, to: target.id },
+  ];
 
   for (const d of descendantsOf(tx, issue)) {
     const status = {
@@ -2448,7 +2451,12 @@ function carryForward(
       resolvedAt: d.resolved_at == null ? null : String(d.resolved_at),
     });
     writeStatus(tx, issueId, target.id, resolvedAt);
-    moved.push({ id: issueId, key: `${key}-${Number(d.number)}`, statusId: String(d.status_id) });
+    moved.push({
+      id: issueId,
+      key: `${key}-${Number(d.number)}`,
+      from: String(d.status_id),
+      to: target.id,
+    });
   }
 
   // Recorded even when nothing came along: an intermediate step that carried nothing
@@ -2491,7 +2499,9 @@ function putBack(
   },
 ): StatusMoveResult {
   const { issue, subject, target, key } = ctx;
-  const moved: StatusChange[] = [subject];
+  const moved: StatusMove[] = [
+    { id: issue.id, key: subject.key, from: subject.statusId, to: target.id },
+  ];
   const skipped: StatusChange[] = [];
   const find = tx.prepare(
     `SELECT id, from_status_id, items_json FROM status_moves
@@ -2513,18 +2523,15 @@ function putBack(
         .prepare("SELECT number, status_id FROM issues WHERE id = ? AND archived_at IS NULL")
         .get(item.id) as unknown as Row | undefined;
       if (!now) continue;
-      const change = {
-        id: item.id,
-        key: `${key}-${Number(now.number)}`,
-        statusId: String(now.status_id),
-      };
+      const at = String(now.status_id);
+      const named = { id: item.id, key: `${key}-${Number(now.number)}` };
       // Somebody has worked on it since. Their move wins over this one being undone.
-      if (String(now.status_id) !== item.to) {
-        skipped.push(change);
+      if (at !== item.to) {
+        skipped.push({ ...named, statusId: at });
         continue;
       }
       writeStatus(tx, item.id, item.from, item.resolvedAt);
-      moved.push(change);
+      moved.push({ ...named, from: at, to: item.from });
     }
 
     tx.prepare("UPDATE status_moves SET reverted_at = ? WHERE id = ?").run(
@@ -2569,8 +2576,8 @@ export function getStatusMove(id: string): { id: string; projectId: string } | n
  */
 export function revertStatusMove(
   moveId: string,
-): { moved: StatusChange[]; skipped: StatusChange[] } | IssueError {
-  return withWrite((tx): { moved: StatusChange[]; skipped: StatusChange[] } | IssueError => {
+): { moved: StatusMove[]; skipped: StatusChange[] } | IssueError {
+  return withWrite((tx): { moved: StatusMove[]; skipped: StatusChange[] } | IssueError => {
     const record = tx.prepare("SELECT * FROM status_moves WHERE id = ?").get(moveId) as unknown as
       | Row
       | undefined;
@@ -2578,7 +2585,7 @@ export function revertStatusMove(
     if (record.reverted_at != null) return { moved: [], skipped: [] };
 
     const key = projectKeyOf(tx, String(record.project_id));
-    const moved: StatusChange[] = [];
+    const moved: StatusMove[] = [];
     const skipped: StatusChange[] = [];
 
     for (const item of JSON.parse(String(record.items_json)) as MoveItem[]) {
@@ -2586,17 +2593,14 @@ export function revertStatusMove(
         .prepare("SELECT number, status_id FROM issues WHERE id = ? AND archived_at IS NULL")
         .get(item.id) as unknown as Row | undefined;
       if (!now) continue;
-      const change = {
-        id: item.id,
-        key: `${key}-${Number(now.number)}`,
-        statusId: String(now.status_id),
-      };
-      if (String(now.status_id) !== item.to) {
-        skipped.push(change);
+      const at = String(now.status_id);
+      const named = { id: item.id, key: `${key}-${Number(now.number)}` };
+      if (at !== item.to) {
+        skipped.push({ ...named, statusId: at });
         continue;
       }
       writeStatus(tx, item.id, item.from, item.resolvedAt);
-      moved.push(change);
+      moved.push({ ...named, from: at, to: item.from });
     }
 
     tx.prepare("UPDATE status_moves SET reverted_at = ? WHERE id = ?").run(

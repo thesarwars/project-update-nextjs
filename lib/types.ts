@@ -228,6 +228,20 @@ export interface StatusChange {
 }
 
 /**
+ * One issue a move changed, and both ends of the change.
+ *
+ * `to` is what lets a board paint a carried card the moment the answer arrives instead of
+ * waiting for the next server render — and in a put-back each card returns to its own
+ * recorded status, so one target for the whole list would not do.
+ */
+export interface StatusMove {
+  id: string;
+  key: string;
+  from: string;
+  to: string;
+}
+
+/**
  * The outcome of a status change that may have carried other issues with it.
  *
  * Moving a parent forward takes the work behind it along; moving it back puts down
@@ -239,8 +253,8 @@ export interface StatusMoveResult {
   moveId: string | null;
   /** The status the subject ended up in. */
   statusId: string;
-  /** What changed, subject first, each carrying the status it had before. */
-  moved: StatusChange[];
+  /** What changed, subject first, each with where it came from and went to. */
+  moved: StatusMove[];
   /** Recorded as carried, but left alone because they have moved on since. */
   skipped: StatusChange[];
   /**

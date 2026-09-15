@@ -128,10 +128,31 @@ export default function BoardView({
         return;
       }
 
-      // A drop on a parent carries the work behind it, or puts back what it carried
-      // before. Say what happened — the cards involved may be in a column scrolled out of
-      // sight — and hand back the way to reverse it.
       const result = (await res.json().catch(() => ({}))) as MoveResult;
+
+      // Paint everything the move carried, now. Only the dragged card was painted before
+      // the request — which cards would come with it is the server's answer, not
+      // something the board could know — and without this they sit in their old column
+      // until the refresh lands. That is a round trip nobody has a reason to wait for,
+      // and it reads as the board not having noticed.
+      setMoved((m) => {
+        const next = { ...m };
+        for (const change of result.moved ?? []) {
+          if (change.id === id) continue;
+          const card = issues.find((i) => i.id === change.id);
+          // A card with no board rank yet has nothing to sort by; the refresh can have it.
+          if (!card?.boardRank) continue;
+          next[change.id] = {
+            from: { statusId: change.from, boardRank: card.boardRank },
+            statusId: change.to,
+            boardRank: card.boardRank,
+          };
+        }
+        return next;
+      });
+
+      // Say what happened — the cards involved may be in a column scrolled out of sight —
+      // and hand back the way to reverse it.
       const report = moveReport(result, column.status.name);
       if (report) {
         toast({

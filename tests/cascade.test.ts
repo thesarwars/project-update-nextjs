@@ -60,11 +60,13 @@ function tree(label: string) {
 const statusOf = (id: string) => db.getIssue(id)!.statusId;
 
 type Change = { id: string; key: string; statusId: string };
+/** A moved issue carries both ends, so a board can paint it without a server round trip. */
+type Move = { id: string; key: string; from: string; to: string };
 type Result = {
   issue: Issue;
   moveId: string | null;
   statusId: string;
-  moved: Change[];
+  moved: Move[];
   skipped: Change[];
   offer: Change[];
 };
@@ -75,7 +77,7 @@ function cascade(id: string, statusId: string): Result {
   return result as Result;
 }
 
-const ids = (changes: Change[]) => changes.map((c) => c.id).sort();
+const ids = (changes: { id: string }[]) => changes.map((c) => c.id).sort();
 
 describe("status order", () => {
   it("ranks by category first, then by the project's own order", () => {
@@ -99,8 +101,9 @@ describe("updateIssueCascading", () => {
     for (const issue of [epic, story, task, ...subs]) {
       assert.equal(statusOf(issue.id), inProgress.id, issue.title);
     }
-    // Every entry records where it was, not where it went — that is what undo replays.
-    assert.ok(moved.every((m) => m.statusId === todo.id));
+    // Every entry carries both ends: where it was, which is what undo replays, and where
+    // it went, which is what the board paints straight away.
+    assert.ok(moved.every((m) => m.from === todo.id && m.to === inProgress.id));
     assert.equal(moved[0].id, epic.id, "the issue that was moved comes first");
   });
 
@@ -150,8 +153,8 @@ describe("updateIssueCascading", () => {
     const before = [epic, story, task, ...subs].map((i) => [i.id, statusOf(i.id)] as const);
 
     const { moved } = cascade(epic.id, inProgress.id);
-    // What the Undo button does: put each one back where it was found.
-    for (const change of moved) db.updateIssueCascading(change.id, { statusId: change.statusId });
+    // Replaying the record by hand, which is what the reported ends are for.
+    for (const change of moved) db.updateIssueCascading(change.id, { statusId: change.from });
 
     for (const [id, status] of before) assert.equal(statusOf(id), status, id);
   });
@@ -220,7 +223,7 @@ describe("putting a status move back", () => {
     const forward = cascade(epic.id, inProgress.id);
     assert.deepEqual(
       ids(forward.moved),
-      ids([{ id: epic.id }, ...stories.slice(0, 3).map((s) => ({ id: s.id }))] as Change[]),
+      ids([{ id: epic.id }, ...stories.slice(0, 3).map((s) => ({ id: s.id }))]),
       "only the three that were behind came along",
     );
 
@@ -288,7 +291,7 @@ describe("putting a status move back", () => {
 
     assert.equal(statusOf(epic.id), todo.id);
     assert.equal(back.moved.length, 1, "the epic alone — nothing was assumed");
-    assert.deepEqual(ids(back.offer), ids(stories.map((s) => ({ id: s.id })) as Change[]));
+    assert.deepEqual(ids(back.offer), ids(stories.map((s) => ({ id: s.id }))));
     for (const story of stories) assert.equal(statusOf(story.id), inProgress.id);
   });
 
@@ -312,13 +315,13 @@ describe("putting a status move back", () => {
     const forward = cascade(epic.id, inProgress.id);
     assert.ok(forward.moveId);
 
-    const first = db.revertStatusMove(forward.moveId!) as { moved: Change[]; skipped: Change[] };
+    const first = db.revertStatusMove(forward.moveId!) as { moved: Move[]; skipped: Change[] };
     assert.equal(first.moved.length, 6, "the epic and its five stories");
     assert.equal(statusOf(epic.id), todo.id, "Undo puts the subject back too");
     for (const story of stories) assert.equal(statusOf(story.id), todo.id);
 
     // Clicking it twice, or dragging the parent back after clicking it, changes nothing.
-    const second = db.revertStatusMove(forward.moveId!) as { moved: Change[] };
+    const second = db.revertStatusMove(forward.moveId!) as { moved: Move[] };
     assert.equal(second.moved.length, 0);
   });
 
